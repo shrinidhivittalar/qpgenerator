@@ -25,6 +25,8 @@ const emptyResults = (): Record<QuestionType, TypeResult> => ({
   reordering:        { status: 'idle' },
   sorting:           { status: 'idle' },
   trueFalse:         { status: 'idle' },
+  assertionReason:   { status: 'idle' },
+  shortAnswer:       { status: 'idle' },
 });
 
 export function useGeneration() {

@@ -13,6 +13,7 @@ const GenerationRunSchema = new Schema(
     tokensUsed:      { type: Number,                default: 0 },
     durationMs:      { type: Number,                default: 0 },
     requestId:       { type: String },
+    chapterIds:      { type: [Schema.Types.ObjectId], ref: 'TextbookChapter', default: [] },
   },
   { timestamps: true },
 );

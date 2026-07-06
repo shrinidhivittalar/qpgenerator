@@ -7,7 +7,7 @@ import SchemePicker from '../components/SchemePicker';
 import TypeConfigurator from '../components/TypeConfigurator';
 import GenerationProgress from '../components/GenerationProgress';
 import QuestionBlock from '../components/QuestionBlock';
-import type { Scheme, TypeConfig, ChapterInfo } from '../types';
+import type { Scheme, TypeConfig, ChapterInfo, ReferenceBank } from '../types';
 
 // ── Small re-usable spinner ────────────────────────────────────────────────
 function Spinner({ className = 'w-4 h-4' }: { className?: string }) {
@@ -136,6 +136,74 @@ export default function DashboardPage() {
       n.has(id) ? n.delete(id) : n.add(id);
       return n;
     });
+  }
+
+  // ── Reference Bank state ───────────────────────────────────────────────────
+  const [banks,         setBanks]         = useState<ReferenceBank[]>([]);
+  const [banksLoading,  setBanksLoading]  = useState(true);
+  const [showBankForm,  setShowBankForm]  = useState(false);
+  const [uploadingBank, setUploadingBank] = useState(false);
+  const [bankFile,      setBankFile]      = useState<File | null>(null);
+  const [bankForm,      setBankForm]      = useState({ bankId: '', subject: '', sourceYear: '' });
+  const [bankUploadError, setBankUploadError] = useState<string | null>(null);
+  const [deletingBankId,  setDeletingBankId]  = useState<string | null>(null);
+  const bankFileRef = useRef<HTMLInputElement>(null);
+
+  async function loadBanks() {
+    setBanksLoading(true);
+    try {
+      const res  = await apiFetch('/api/reference-bank');
+      const data = await res.json() as ReferenceBank[];
+      setBanks(data ?? []);
+    } catch {
+      setBanks([]);
+    } finally {
+      setBanksLoading(false);
+    }
+  }
+
+  useEffect(() => { loadBanks(); }, []);
+
+  async function handleBankUpload(e: FormEvent) {
+    e.preventDefault();
+    if (!bankFile)                  { setBankUploadError('Select a PDF file.');      return; }
+    if (!bankForm.bankId.trim())    { setBankUploadError('Bank label is required.'); return; }
+
+    setBankUploadError(null);
+    setUploadingBank(true);
+    try {
+      const form = new FormData();
+      form.append('file',    bankFile);
+      form.append('bankId',  bankForm.bankId.trim());
+      if (bankForm.subject.trim())    form.append('subject',    bankForm.subject.trim());
+      if (bankForm.sourceYear.trim()) form.append('sourceYear', bankForm.sourceYear.trim());
+
+      const res = await apiFetch('/api/reference-bank/upload', { method: 'POST', body: form });
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        setBankUploadError(body.error ?? 'Upload failed.');
+        return;
+      }
+      setBankForm({ bankId: '', subject: '', sourceYear: '' });
+      setBankFile(null);
+      if (bankFileRef.current) bankFileRef.current.value = '';
+      setShowBankForm(false);
+      await loadBanks();
+    } catch {
+      setBankUploadError('Upload failed.');
+    } finally {
+      setUploadingBank(false);
+    }
+  }
+
+  async function handleDeleteBank(bankId: string) {
+    setDeletingBankId(bankId);
+    try {
+      await apiFetch(`/api/reference-bank/${encodeURIComponent(bankId)}`, { method: 'DELETE' });
+      setBanks(bs => bs.filter(b => b.id !== bankId));
+    } finally {
+      setDeletingBankId(null);
+    }
   }
 
   // ── My Schemes sidebar state ───────────────────────────────────────────────
@@ -673,6 +741,122 @@ export default function DashboardPage() {
                     Generation still works; weights are normalised automatically.
                   </p>
                 )}
+              </div>
+            )}
+          </div>
+
+          {/* ── My Reference Banks ─────────────────────────────────── */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold text-gray-800">My Reference Banks</h2>
+            </div>
+
+            <button
+              onClick={() => { setShowBankForm(v => !v); setBankUploadError(null); }}
+              className="w-full text-left text-xs font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
+            >
+              {showBankForm ? '− Cancel' : '+ Add past paper'}
+            </button>
+
+            {showBankForm && (
+              <form onSubmit={handleBankUpload} className="rounded-xl border border-indigo-100 bg-indigo-50 p-3 space-y-2">
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Paper PDF</label>
+                  <input
+                    ref={bankFileRef}
+                    type="file"
+                    accept="application/pdf"
+                    onChange={e => setBankFile(e.target.files?.[0] ?? null)}
+                    className="mt-1 block w-full text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-white file:text-gray-700 hover:file:bg-gray-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">
+                    Bank label <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={bankForm.bankId}
+                    onChange={e => setBankForm(f => ({ ...f, bankId: e.target.value }))}
+                    placeholder="e.g. CBSE-2023"
+                    className="mt-1 block w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-gray-600 font-medium">Subject</label>
+                    <input
+                      type="text"
+                      value={bankForm.subject}
+                      onChange={e => setBankForm(f => ({ ...f, subject: e.target.value }))}
+                      placeholder="e.g. Physics"
+                      className="mt-1 block w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-600 font-medium">Year</label>
+                    <input
+                      type="number"
+                      min="1900"
+                      max="2100"
+                      value={bankForm.sourceYear}
+                      onChange={e => setBankForm(f => ({ ...f, sourceYear: e.target.value }))}
+                      placeholder="2023"
+                      className="mt-1 block w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                    />
+                  </div>
+                </div>
+
+                {bankUploadError && (
+                  <p className="text-xs text-red-600">{bankUploadError}</p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={uploadingBank}
+                  className="w-full rounded-lg py-1.5 text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                >
+                  {uploadingBank ? 'Uploading…' : 'Save to bank'}
+                </button>
+              </form>
+            )}
+
+            {banksLoading ? (
+              <div className="flex items-center gap-2 py-3 text-sm text-gray-400">
+                <Spinner />
+                Loading…
+              </div>
+            ) : banks.length === 0 ? (
+              <p className="text-sm text-gray-400 py-1">
+                No reference banks yet. Upload a past paper to add one.
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {banks.map(bank => (
+                  <div
+                    key={bank.id}
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 flex items-center gap-2"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-gray-800 truncate">{bank.name}</p>
+                    </div>
+                    <button
+                      onClick={() => handleDeleteBank(bank.id)}
+                      disabled={deletingBankId === bank.id}
+                      className="shrink-0 text-gray-300 hover:text-red-500 transition-colors disabled:opacity-40"
+                      title="Delete bank"
+                    >
+                      {deletingBankId === bank.id
+                        ? <Spinner className="w-3.5 h-3.5" />
+                        : <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                      }
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
           </div>

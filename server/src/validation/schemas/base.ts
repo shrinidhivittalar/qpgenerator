@@ -12,7 +12,10 @@ export const contentFieldSchema = z.object({
 export const optionSchema = contentFieldSchema;
 
 export const baseQuestionSchema = z.object({
-  id:          z.number(),
+  // id is assigned server-side by assignGlobalIds() after generation — raw AI
+  // output never carries it. Optional here so validation accepts untagged output;
+  // the export validator enforces presence after IDs are written.
+  id:          z.number().optional(),
   marks:       z.number().positive(),
   explanation: z.string().min(1),
   question:    contentFieldSchema,

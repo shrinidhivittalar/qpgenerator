@@ -1,20 +1,27 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import mongoose from 'mongoose';
 
 import { requireRole } from '../middleware/requireRole.js';
 import { QuestionSet } from '../models/QuestionSet.js';
 import { GenerationRun } from '../models/GenerationRun.js';
 import Scheme from '../models/Scheme.js';
-import { generateSet, makeTrackedGenerateFn, TypeConfig } from '../ai/generator.js';
+import TextbookChapter from '../models/TextbookChapter.js';
+import {
+  generateSet, generateTypeViaSlots, makeTrackedGenerateFn, TypeConfig,
+} from '../ai/generator.js';
+import { createLimiter } from '../lib/concurrency.js';
+import { assignGlobalIds, QuestionBlock } from '../validation/index.js';
 import { checkAndReserveBudget } from '../services/tokenBudget.js';
 import { logger } from '../lib/logger.js';
 import { DifficultyLevel, ToneOption } from '../validation/schemas/typeConfig.js';
+import type { ChapterInput } from '../ai/slotAllocator.js';
 
 const router = Router();
 
 const VALID_TYPES = [
   'fillInBlanks', 'multipleChoice', 'multiSelect', 'matchTheFollowing',
-  'reordering', 'sorting', 'trueFalse',
+  'reordering', 'sorting', 'trueFalse', 'assertionReason', 'shortAnswer',
 ] as const;
 
 const TypeConfigItemSchema = z.object({
@@ -26,6 +33,7 @@ const TypeConfigItemSchema = z.object({
 
 const GenerateBodySchema = z.object({
   typeConfig:        z.array(TypeConfigItemSchema).min(1),
+  chapterIds:        z.array(z.string()).optional(),
   schemeId:          z.string().optional(),
   bankId:            z.string().optional(),
   difficultyDefault: DifficultyLevel.optional(),
@@ -64,8 +72,7 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     }
   }
 
-  // Filter zero-count entries, then check if anything remains (EC-GEN-02)
-  const { difficultyDefault, tone, bankId } = bodyResult.data;
+  const { difficultyDefault, tone, bankId, chapterIds } = bodyResult.data;
 
   // Resolve each type's effective difficulty before generation
   const effectiveTypeConfig = bodyResult.data.typeConfig.map(tc => ({
@@ -86,30 +93,95 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     return;
   }
 
-  // 4. Generate
-  const { generateFn, getTokensUsed } = makeTrackedGenerateFn();
+  // 4. Resolve chapters for slot-based generation path (Phase 8)
+  let resolvedChapters: ChapterInput[] = [];
+  if (chapterIds && chapterIds.length > 0) {
+    const validIds = chapterIds.filter(id => mongoose.isValidObjectId(id));
+    if (validIds.length > 0) {
+      const docs = await TextbookChapter.find({
+        _id:       { $in: validIds },
+        teacherId: userId,
+      }).lean();
+      docs.sort((a, b) => a.chapterNumber - b.chapterNumber);
+      resolvedChapters = docs.map(c => ({
+        id:                c._id.toString(),
+        name:              c.title,
+        weightPercent:     c.weightPercent,
+        sourceText:        c.sourceText,
+        highValueSnippets: c.highValueSnippets,
+      }));
+    }
+  }
+
+  // 5. Generate — slot path when chapters resolved, text path otherwise
   const startTime = Date.now();
-  let blocks: Awaited<ReturnType<typeof generateSet>>['blocks'];
-  let errors: Awaited<ReturnType<typeof generateSet>>['errors'];
+  let blocks:     QuestionBlock[] = [];
+  let errors:     Array<{ type: string; requested: number; received: number; error: string }> = [];
+  let tokensUsed = 0;
 
   try {
-    ({ blocks, errors } = await generateSet(set.sourceText, activeTypeConfig, generateFn, {
-      tone,
-      bankId,
-      teacherId:   userId,
-      subjectHint: set.department,
-    }));
+    if (resolvedChapters.length > 0) {
+      // Slot-based: one Groq call per question, concurrency capped at 3
+      const limiter = createLimiter(3);
+
+      const slotSettled = await Promise.allSettled(
+        activeTypeConfig.map(tc =>
+          generateTypeViaSlots(
+            tc.type, tc.count, tc.marksPerQuestion, resolvedChapters,
+            tc.difficulty ?? undefined,
+            userId, tone ?? 'formal-board-exam', bankId ?? undefined, limiter,
+          ).then(r => ({ type: tc.type, marksPerQuestion: tc.marksPerQuestion, ...r })),
+        ),
+      );
+
+      for (const outcome of slotSettled) {
+        if (outcome.status === 'rejected') continue;
+        const { type, marksPerQuestion, questions, requested, received } = outcome.value;
+        if (received >= requested) {
+          blocks.push({
+            questionType: type,
+            totalMarks:   questions.reduce(
+              (sum: number, q: any) => sum + ((q.marks as number) ?? marksPerQuestion),
+              0,
+            ),
+            status:    'success',
+            questions: questions.slice(0, requested),
+          });
+        } else {
+          errors.push({
+            type,
+            requested,
+            received,
+            error: received === 0
+              ? `Could not generate any ${type} questions from the selected chapters.`
+              : `Insufficient chapter content to generate ${requested} ${type} questions.`,
+          });
+        }
+      }
+
+      // ADR-004: single ID-assignment pass after all types complete
+      assignGlobalIds(blocks);
+    } else {
+      // Original text-based path
+      const { generateFn, getTokensUsed } = makeTrackedGenerateFn();
+      const result = await generateSet(set.sourceText, activeTypeConfig, generateFn, {
+        tone,
+        bankId,
+        teacherId:   userId,
+        subjectHint: set.department,
+      });
+      blocks     = result.blocks;
+      errors     = result.errors;
+      tokensUsed = getTokensUsed();
+    }
   } catch {
-    // generateSet uses allSettled internally and should not throw under normal
-    // conditions; if it does (e.g. Groq client init failure), treat as 503.
     res.status(503).json({ error: 'AI service unavailable. Please try again.' });
     return;
   }
 
-  const durationMs  = Date.now() - startTime;
-  const tokensUsed  = getTokensUsed();
+  const durationMs = Date.now() - startTime;
 
-  // 5. Persist results
+  // 6. Persist results
   // Resolve optional schemeId — silently ignore if invalid or not owned (SCH-12)
   const { schemeId } = bodyResult.data;
   if (schemeId) {
@@ -123,10 +195,10 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     }
   }
 
-  // Audit metadata — silently stored regardless of bankId validity (Stage 3 will validate)
-  if (difficultyDefault) set.difficultyDefault = difficultyDefault as any;
-  if (tone)              set.tone              = tone as any;
-  if (bankId)            set.bankId            = bankId as any;
+  if (difficultyDefault)            set.difficultyDefault = difficultyDefault as any;
+  if (tone)                         set.tone              = tone as any;
+  if (bankId)                       set.bankId            = bankId as any;
+  if (resolvedChapters.length > 0)  set.chapterIds        = resolvedChapters.map(c => c.id) as any;
 
   set.questionBlocks   = blocks as any;
   set.generationErrors = errors as any;
@@ -134,7 +206,7 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
   set.status           = 'draft';
   await set.save();
 
-  // 6. Audit log — created regardless of partial failure (EC-DATA-01)
+  // 7. Audit log — created regardless of partial failure (EC-DATA-01)
   await GenerationRun.create({
     setId:           set._id,
     userId,
@@ -146,7 +218,8 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     countsGenerated: Object.fromEntries(blocks.map(b => [b.questionType, b.questions.length])),
     tokensUsed,
     durationMs,
-    requestId: (req as any).requestId,
+    requestId:       (req as any).requestId,
+    ...(resolvedChapters.length > 0 && { chapterIds: resolvedChapters.map(c => c.id) }),
   });
 
   logger.info('generation_complete', {
@@ -159,6 +232,8 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     typesSucceeded: blocks.map(b => b.questionType),
     typesFailed:    errors.map(e => e.type),
     tokensUsed,
+    slotPath:       resolvedChapters.length > 0,
+    chapterCount:   resolvedChapters.length,
   });
 
   res.status(200).json({

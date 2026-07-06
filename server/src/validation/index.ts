@@ -18,7 +18,8 @@ export class ValidationError extends Error {
   }
 }
 
-function extractPrimaryText(_type: QuestionType, data: any): string {
+function extractPrimaryText(type: QuestionType, data: any): string {
+  if (type === 'assertionReason') return (data.assertion ?? '') as string;
   return (data.question?.text ?? '') as string;
 }
 

@@ -115,11 +115,12 @@ The server calls `validateEnv()` at startup and **exits immediately** if any req
 
 ---
 
-## Seven Question Types
+## Nine Question Types
 
 ```
 fillInBlanks | multipleChoice | multiSelect | matchTheFollowing
-reordering   | sorting        | trueFalse
+reordering   | sorting        | trueFalse   | assertionReason
+shortAnswer
 ```
 
 Each type has:

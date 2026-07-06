@@ -5,13 +5,13 @@ import mongoose from 'mongoose';
 import { requireAuth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
 import { extractSchemeText } from '../ai/extractor.js';
-import { parseScheme, TypeConfig } from '../ai/schemeParser.js';
+import { parseSchemeBlueprint, TypeConfig } from '../ai/schemeParser.js';
 import Scheme from '../models/Scheme.js';
 import { logger } from '../lib/logger.js';
+import { ExamBlueprint, blueprintToTypeConfig } from '../validation/schemas/examBlueprint.js';
 
 const router = Router();
 
-// All scheme routes are teacher-only (SCH-14)
 router.use(requireAuth, requireRole('teacher'));
 
 const MAX_SCHEME_BYTES = 5 * 1024 * 1024;
@@ -23,19 +23,16 @@ const ALLOWED_MIMES: Record<string, true> = {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits:  { fileSize: MAX_SCHEME_BYTES },
+  limits: { fileSize: MAX_SCHEME_BYTES },
   fileFilter(_req, file, cb) {
-    if (ALLOWED_MIMES[file.mimetype]) {
-      cb(null, true);
-    } else {
-      cb(new Error('INVALID_FILE_TYPE'));
-    }
+    if (ALLOWED_MIMES[file.mimetype]) cb(null, true);
+    else cb(new Error('INVALID_FILE_TYPE'));
   },
 });
 
 function toPreviewSections(parsedConfig: TypeConfig[]): string[] {
   return parsedConfig.map(
-    tc => `${tc.type} (${tc.count} × ${tc.marksPerQuestion} mark${tc.marksPerQuestion !== 1 ? 's' : ''})`,
+    tc => `${tc.type} (${tc.count} x ${tc.marksPerQuestion} mark${tc.marksPerQuestion !== 1 ? 's' : ''})`,
   );
 }
 
@@ -72,21 +69,35 @@ async function runUpload(req: Request, res: Response): Promise<
     return null;
   }
 
-  let rawText: string;
-  let fileType: 'pdf' | 'docx';
   try {
-    ({ text: rawText, fileType } = await extractSchemeText(req.file.buffer, req.file.mimetype));
+    const { text, fileType } = await extractSchemeText(req.file.buffer, req.file.mimetype);
+    return { rawText: text, fileType };
   } catch {
     res.status(422).json({ error: 'Could not extract text from this file.' });
     return null;
   }
-
-  return { rawText, fileType };
 }
 
-async function runParseScheme(rawText: string, res: Response): Promise<TypeConfig[] | null> {
+function mergeDuplicateTypes(config: TypeConfig[]): TypeConfig[] {
+  const merged = new Map<string, TypeConfig>();
+  for (const tc of config) {
+    const key = `${tc.type}:${tc.marksPerQuestion}`;
+    if (merged.has(key)) merged.get(key)!.count += tc.count;
+    else merged.set(key, { ...tc });
+  }
+  return Array.from(merged.values());
+}
+
+async function runParseScheme(
+  rawText: string,
+  res: Response,
+  metadata: { name?: string; subject?: string; standard?: string; examType?: string },
+): Promise<{ parsedConfig: TypeConfig[]; examBlueprint: ExamBlueprint } | null> {
   try {
-    return await parseScheme(rawText);
+    const examBlueprint = await parseSchemeBlueprint(rawText, metadata);
+    const parsedConfig = mergeDuplicateTypes(blueprintToTypeConfig(examBlueprint));
+    if (parsedConfig.length === 0) throw new Error('SCHEME_PARSE_FAILED');
+    return { parsedConfig, examBlueprint };
   } catch (err) {
     const msg = err instanceof Error ? err.message : '';
     if (msg === 'SCHEME_PARSE_FAILED') {
@@ -98,7 +109,6 @@ async function runParseScheme(rawText: string, res: Response): Promise<TypeConfi
   }
 }
 
-// ── POST /api/schemes/upload ─────────────────────────────────────────────────
 router.post('/upload', async (req: Request, res: Response) => {
   const extracted = await runUpload(req, res);
   if (!extracted) return;
@@ -110,40 +120,49 @@ router.post('/upload', async (req: Request, res: Response) => {
     return;
   }
 
-  const parsedConfig = await runParseScheme(rawText, res);
-  if (!parsedConfig) return;
+  const metadata = {
+    name: name.trim(),
+    subject: subject.trim(),
+    standard: standard.trim(),
+    examType: examType?.trim() ?? '',
+  };
+  const parsed = await runParseScheme(rawText, res, metadata);
+  if (!parsed) return;
+  const { parsedConfig, examBlueprint } = parsed;
 
   const scheme = await Scheme.create({
-    teacherId:    (req as any).userId,
-    name:         name.trim().slice(0, 100),
-    subject:      subject.trim(),
-    standard:     standard.trim(),
-    examType:     examType?.trim() ?? '',
+    teacherId: (req as any).userId,
+    name: metadata.name.slice(0, 100),
+    subject: metadata.subject,
+    standard: metadata.standard,
+    examType: metadata.examType,
     rawText,
     parsedConfig,
+    examBlueprint,
     fileType,
   });
 
   logger.info('scheme_uploaded', {
-    requestId:  (req as any).requestId,
-    userId:     (req as any).userId,
-    schemeId:   scheme._id.toString(),
+    requestId: (req as any).requestId,
+    userId: (req as any).userId,
+    schemeId: scheme._id.toString(),
     fileType,
     typesFound: parsedConfig.length,
+    sectionsFound: examBlueprint.sections.length,
   });
 
   res.status(201).json({
-    schemeId:        scheme._id.toString(),
-    name:            scheme.name,
-    subject:         scheme.subject,
-    standard:        scheme.standard,
-    examType:        scheme.examType,
+    schemeId: scheme._id.toString(),
+    name: scheme.name,
+    subject: scheme.subject,
+    standard: scheme.standard,
+    examType: scheme.examType,
     parsedConfig,
+    examBlueprint,
     previewSections: toPreviewSections(parsedConfig),
   });
 });
 
-// ── GET /api/schemes ─────────────────────────────────────────────────────────
 router.get('/', async (req: Request, res: Response) => {
   const schemes = await Scheme
     .find({ teacherId: (req as any).userId })
@@ -153,19 +172,19 @@ router.get('/', async (req: Request, res: Response) => {
 
   res.json(
     schemes.map(s => ({
-      schemeId:    s._id.toString(),
-      name:        s.name,
-      subject:     s.subject,
-      standard:    s.standard,
-      examType:    s.examType,
-      fileType:    s.fileType,
+      schemeId: s._id.toString(),
+      name: s.name,
+      subject: s.subject,
+      standard: s.standard,
+      examType: s.examType,
+      fileType: s.fileType,
       parsedConfig: s.parsedConfig,
-      updatedAt:   s.updatedAt,
+      examBlueprint: s.examBlueprint ?? null,
+      updatedAt: s.updatedAt,
     })),
   );
 });
 
-// ── GET /api/schemes/:id ─────────────────────────────────────────────────────
 router.get('/:id', async (req: Request, res: Response) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     res.status(404).json({ error: 'Scheme not found.' });
@@ -183,19 +202,19 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 
   res.json({
-    schemeId:    scheme._id.toString(),
-    name:        scheme.name,
-    subject:     scheme.subject,
-    standard:    scheme.standard,
-    examType:    scheme.examType,
-    fileType:    scheme.fileType,
+    schemeId: scheme._id.toString(),
+    name: scheme.name,
+    subject: scheme.subject,
+    standard: scheme.standard,
+    examType: scheme.examType,
+    fileType: scheme.fileType,
     parsedConfig: scheme.parsedConfig,
-    rawText:     scheme.rawText,
-    updatedAt:   scheme.updatedAt,
+    examBlueprint: scheme.examBlueprint ?? null,
+    rawText: scheme.rawText,
+    updatedAt: scheme.updatedAt,
   });
 });
 
-// ── PATCH /api/schemes/:id/replace ───────────────────────────────────────────
 router.patch('/:id/replace', async (req: Request, res: Response) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     res.status(404).json({ error: 'Scheme not found.' });
@@ -216,34 +235,41 @@ router.patch('/:id/replace', async (req: Request, res: Response) => {
   if (!extracted) return;
   const { rawText, fileType } = extracted;
 
-  const parsedConfig = await runParseScheme(rawText, res);
-  if (!parsedConfig) return;
-
   const { name, subject, standard, examType } = req.body as Record<string, string>;
-  if (name?.trim())     existing.name     = name.trim().slice(0, 100);
-  if (subject?.trim())  existing.subject  = subject.trim();
-  if (standard?.trim()) existing.standard = standard.trim();
-  if (examType !== undefined) existing.examType = examType?.trim() ?? '';
+  const metadata = {
+    name: name?.trim() || existing.name,
+    subject: subject?.trim() || existing.subject,
+    standard: standard?.trim() || existing.standard,
+    examType: examType !== undefined ? examType?.trim() ?? '' : existing.examType,
+  };
 
-  existing.rawText      = rawText;
+  const parsed = await runParseScheme(rawText, res, metadata);
+  if (!parsed) return;
+  const { parsedConfig, examBlueprint } = parsed;
+
+  existing.name = metadata.name.slice(0, 100);
+  existing.subject = metadata.subject;
+  existing.standard = metadata.standard;
+  existing.examType = metadata.examType;
+  existing.rawText = rawText;
   existing.parsedConfig = parsedConfig as any;
-  existing.fileType     = fileType;
+  existing.examBlueprint = examBlueprint as any;
+  existing.fileType = fileType;
   await existing.save();
 
   res.json({
-    schemeId:    existing._id.toString(),
-    name:        existing.name,
-    subject:     existing.subject,
-    standard:    existing.standard,
-    examType:    existing.examType,
-    fileType:    existing.fileType,
+    schemeId: existing._id.toString(),
+    name: existing.name,
+    subject: existing.subject,
+    standard: existing.standard,
+    examType: existing.examType,
+    fileType: existing.fileType,
     parsedConfig,
-    updatedAt:   existing.updatedAt,
+    examBlueprint,
+    updatedAt: existing.updatedAt,
   });
 });
 
-// ── DELETE /api/schemes/:id ──────────────────────────────────────────────────
-// SCH-13: pure delete on schemes collection — no cascade to QuestionSet
 router.delete('/:id', async (req: Request, res: Response) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     res.status(404).json({ error: 'Scheme not found.' });

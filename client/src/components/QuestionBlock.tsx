@@ -2,10 +2,12 @@ import { useState } from 'react';
 import { QUESTION_TYPE_LABELS, QuestionType } from '../types';
 
 interface Question {
-  id:          number;
-  marks:       number;
-  explanation: string;
-  question:    { text: string; hide_text: boolean; image: string };
+  id:           number;
+  marks:        number;
+  explanation:  string;
+  question?:    { text: string; hide_text: boolean; image: string };
+  assertion?:   string;
+  modelAnswer?: string;
   [key: string]: unknown;
 }
 
@@ -21,7 +23,7 @@ function QuestionCard({ q, index }: { q: Question; index: number }) {
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium text-gray-800">
           <span className="text-gray-400 mr-1">#{index + 1}</span>
-          {q.question?.text}
+          {q.question?.text ?? q.assertion ?? q.modelAnswer ?? 'Question'}
         </p>
         <span className="shrink-0 text-xs text-gray-500 bg-gray-100 rounded px-1.5 py-0.5">
           {q.marks} {q.marks === 1 ? 'mark' : 'marks'}
@@ -52,12 +54,12 @@ export default function QuestionBlock({ questionType, totalMarks, questions }: P
           <div className="text-left">
             <p className="font-semibold text-gray-800 text-sm">{label}</p>
             <p className="text-xs text-gray-500">
-              {questions.length} {questions.length === 1 ? 'question' : 'questions'} · {totalMarks} marks
+              {questions.length} {questions.length === 1 ? 'question' : 'questions'} - {totalMarks} marks
             </p>
           </div>
         </div>
         <span className="text-xs font-medium text-green-600 bg-green-50 border border-green-100 rounded px-2 py-0.5">
-          ✓ Generated
+          Generated
         </span>
       </button>
 

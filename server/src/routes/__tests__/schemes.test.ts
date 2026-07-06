@@ -1,4 +1,4 @@
-// vi.mock is hoisted — runs before any imports.
+// vi.mock is hoisted â€” runs before any imports.
 vi.mock('pdf-parse/lib/pdf-parse.js', () => ({
   default: vi.fn().mockResolvedValue({ text: 'Section A: MCQ (20 x 1 mark)\nSection B: Fill in blanks (10 x 1 mark)' }),
 }));
@@ -9,9 +9,9 @@ vi.mock('mammoth', () => ({
   },
 }));
 
-// Mock schemeParser so route tests don't depend on Groq — parser is unit-tested separately.
+// Mock schemeParser so route tests don't depend on Groq â€” parser is unit-tested separately.
 vi.mock('../../ai/schemeParser.js', () => ({
-  parseScheme: vi.fn(),
+  parseSchemeBlueprint: vi.fn(),
 }));
 
 import request from 'supertest';
@@ -36,6 +36,39 @@ const PARSED_CONFIG_REPLACED = [
 const FAKE_PDF  = Buffer.from('%PDF-1.4 fake pdf content for testing only');
 const FAKE_DOCX = Buffer.from('PK fake docx content');
 
+function makeBlueprint(config: Array<{ type: string; count: number; marksPerQuestion: number }>, overrides: Record<string, unknown> = {}) {
+  const sections = config.map((tc, index) => ({
+    name: `Section ${String.fromCharCode(65 + index)}`,
+    instructions: '',
+    questionType: tc.type,
+    count: tc.count,
+    marksPerQuestion: tc.marksPerQuestion,
+    totalMarks: tc.count * tc.marksPerQuestion,
+    choicePattern: '',
+    difficultyMix: { easy: 30, moderate: 50, hard: 20 },
+    bloomsDistribution: { remember: 30, understand: 30, apply: 25, analyze: 15 },
+    expectedAnswerStyle: '',
+    sourceEvidence: [],
+  }));
+
+  return {
+    title: 'Inferred Blueprint',
+    examBoard: 'inferred',
+    institutionType: 'school',
+    subject: 'Mathematics',
+    standard: '10',
+    examType: '',
+    totalMarks: sections.reduce((sum, s) => sum + s.totalMarks, 0),
+    tone: 'formal-board-exam',
+    difficultyDefault: 'moderate',
+    chapters: [],
+    sections,
+    globalInstructions: [],
+    constraints: [],
+    inferredFrom: ['scheme-document'],
+    ...overrides,
+  };
+}
 async function registerAndGetToken(suffix = '') {
   const email = `teacher-${Date.now()}-${suffix}${Math.random().toString(36).slice(2)}@test.com`;
   const res = await request(app)
@@ -46,8 +79,8 @@ async function registerAndGetToken(suffix = '') {
 }
 
 async function uploadScheme(token: string, config = PARSED_CONFIG_PDF) {
-  const { parseScheme } = await import('../../ai/schemeParser.js');
-  (parseScheme as ReturnType<typeof vi.fn>).mockResolvedValueOnce(config);
+  const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+  (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeBlueprint(config));
 
   const res = await request(app)
     .post('/api/schemes/upload')
@@ -64,7 +97,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-// ─── TC-SCH-01: Upload PDF → parsedConfig reflects correct types/counts ──────
+// â”€â”€â”€ TC-SCH-01: Upload PDF â†’ parsedConfig reflects correct types/counts â”€â”€â”€â”€â”€â”€
 describe('TC-SCH-01: POST /api/schemes/upload (PDF)', () => {
   it('returns 201 with schemeId, parsedConfig and previewSections derived from config', async () => {
     const { token } = await registerAndGetToken('01');
@@ -99,8 +132,8 @@ describe('TC-SCH-01: POST /api/schemes/upload (PDF)', () => {
 
   it('returns 422 when scheme parser cannot identify question types (SCH-06)', async () => {
     const { token } = await registerAndGetToken('01c');
-    const { parseScheme } = await import('../../ai/schemeParser.js');
-    (parseScheme as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('SCHEME_PARSE_FAILED'));
+    const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+    (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('SCHEME_PARSE_FAILED'));
 
     const res = await request(app)
       .post('/api/schemes/upload')
@@ -126,12 +159,12 @@ describe('TC-SCH-01: POST /api/schemes/upload (PDF)', () => {
   });
 });
 
-// ─── TC-SCH-02: Upload .docx scheme ─────────────────────────────────────────
+// â”€â”€â”€ TC-SCH-02: Upload .docx scheme â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 describe('TC-SCH-02: POST /api/schemes/upload (.docx)', () => {
   it('extracts text via mammoth and parses correctly', async () => {
     const { token } = await registerAndGetToken('02');
-    const { parseScheme } = await import('../../ai/schemeParser.js');
-    (parseScheme as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PARSED_CONFIG_DOCX);
+    const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+    (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeBlueprint(PARSED_CONFIG_DOCX));
 
     const res = await request(app)
       .post('/api/schemes/upload')
@@ -155,7 +188,7 @@ describe('TC-SCH-02: POST /api/schemes/upload (.docx)', () => {
   });
 });
 
-// ─── TC-SCH-03: GET /api/schemes → scheme appears in list for second set ─────
+// â”€â”€â”€ TC-SCH-03: GET /api/schemes â†’ scheme appears in list for second set â”€â”€â”€â”€â”€
 describe('TC-SCH-03: GET /api/schemes (saved scheme appears in picker)', () => {
   it('returns the saved scheme after upload, sorted by updatedAt desc', async () => {
     const { token } = await registerAndGetToken('03');
@@ -186,7 +219,7 @@ describe('TC-SCH-03: GET /api/schemes (saved scheme appears in picker)', () => {
   });
 });
 
-// ─── TC-SCH-04: Replace → new parsedConfig; QuestionSet typeConfig unchanged ─
+// â”€â”€â”€ TC-SCH-04: Replace â†’ new parsedConfig; QuestionSet typeConfig unchanged â”€
 describe('TC-SCH-04: PATCH /api/schemes/:id/replace', () => {
   it('updates scheme parsedConfig without touching any QuestionSet that references it', async () => {
     const { token, userId } = await registerAndGetToken('04');
@@ -207,9 +240,9 @@ describe('TC-SCH-04: PATCH /api/schemes/:id/replace', () => {
       schemeId:    new mongoose.Types.ObjectId(schemeId),
     });
 
-    // 3. Replace scheme with new file → different parsedConfig
-    const { parseScheme } = await import('../../ai/schemeParser.js');
-    (parseScheme as ReturnType<typeof vi.fn>).mockResolvedValueOnce(PARSED_CONFIG_REPLACED);
+    // 3. Replace scheme with new file â†’ different parsedConfig
+    const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+    (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeBlueprint(PARSED_CONFIG_REPLACED));
 
     const replaceRes = await request(app)
       .patch(`/api/schemes/${schemeId}/replace`)
@@ -228,7 +261,7 @@ describe('TC-SCH-04: PATCH /api/schemes/:id/replace', () => {
   });
 });
 
-// ─── TC-SCH-05: Delete → scheme gone; QuestionSet still functional ────────────
+// â”€â”€â”€ TC-SCH-05: Delete â†’ scheme gone; QuestionSet still functional â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 describe('TC-SCH-05: DELETE /api/schemes/:id', () => {
   it('deletes scheme but leaves any referencing QuestionSet intact (SCH-13)', async () => {
     const { token, userId } = await registerAndGetToken('05');
@@ -246,7 +279,7 @@ describe('TC-SCH-05: DELETE /api/schemes/:id', () => {
       schemeId:   new mongoose.Types.ObjectId(schemeId),
     });
 
-    // Delete the scheme (SCH-13 — no cascade)
+    // Delete the scheme (SCH-13 â€” no cascade)
     const delRes = await request(app)
       .delete(`/api/schemes/${schemeId}`)
       .set('Authorization', `Bearer ${token}`);
@@ -278,7 +311,7 @@ describe('TC-SCH-05: DELETE /api/schemes/:id', () => {
   });
 });
 
-// ─── TC-SCH-06: Cross-teacher 403 for GET, PATCH, DELETE ─────────────────────
+// â”€â”€â”€ TC-SCH-06: Cross-teacher 403 for GET, PATCH, DELETE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 describe('TC-SCH-06: Cross-teacher authorization (SCH-14)', () => {
   it('returns 403 when teacher B tries to GET a scheme owned by teacher A', async () => {
     const a = await registerAndGetToken('06a');
@@ -301,7 +334,7 @@ describe('TC-SCH-06: Cross-teacher authorization (SCH-14)', () => {
     const uploadRes = await uploadScheme(a.token);
     const schemeId = uploadRes.body.schemeId as string;
 
-    // No parseScheme mock needed — ownership check fires before extraction/parsing
+    // No parseScheme mock needed â€” ownership check fires before extraction/parsing
     const res = await request(app)
       .patch(`/api/schemes/${schemeId}/replace`)
       .set('Authorization', `Bearer ${b.token}`)
@@ -330,12 +363,12 @@ describe('TC-SCH-06: Cross-teacher authorization (SCH-14)', () => {
   });
 });
 
-// ─── TC-SCH-07: Parser type safety — no invalid type names ever emitted ───────
+// â”€â”€â”€ TC-SCH-07: Parser type safety â€” no invalid type names ever emitted â”€â”€â”€â”€â”€â”€â”€
 describe('TC-SCH-07: Scheme parser type safety (integration with route)', () => {
   it('returns 422 when parseScheme throws SCHEME_PARSE_FAILED (all types unknown/zero)', async () => {
     const { token } = await registerAndGetToken('07');
-    const { parseScheme } = await import('../../ai/schemeParser.js');
-    (parseScheme as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('SCHEME_PARSE_FAILED'));
+    const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+    (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('SCHEME_PARSE_FAILED'));
 
     const res = await request(app)
       .post('/api/schemes/upload')
@@ -347,13 +380,13 @@ describe('TC-SCH-07: Scheme parser type safety (integration with route)', () => 
     expect(res.body.error).toMatch(/parse/i);
   });
 
-  it('stores only the config returned by parseScheme — route never re-injects types', async () => {
+  it('stores only the config returned by parseScheme â€” route never re-injects types', async () => {
     const { token } = await registerAndGetToken('07b');
     // Parser returns only 1 valid type (as if other sections were filtered out)
-    const { parseScheme } = await import('../../ai/schemeParser.js');
-    (parseScheme as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+    const { parseSchemeBlueprint } = await import('../../ai/schemeParser.js');
+    (parseSchemeBlueprint as ReturnType<typeof vi.fn>).mockResolvedValueOnce(makeBlueprint([
       { type: 'trueFalse', count: 10, marksPerQuestion: 1 },
-    ]);
+    ]));
 
     const res = await request(app)
       .post('/api/schemes/upload')

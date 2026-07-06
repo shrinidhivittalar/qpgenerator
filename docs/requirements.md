@@ -118,7 +118,9 @@ This document specifies the complete functional and non-functional requirements 
 
 ---
 
-## 5. Scheme Requirements
+## 5. Blueprint Inference Requirements
+
+The scheme upload is the primary mechanism for blueprint inference. A "scheme" can be any pattern document — a formal marking scheme, a previous year paper, a model paper, a syllabus, or any institutional exam instruction document. The system infers the exam structure from it without assuming any specific board.
 
 | ID | Requirement |
 |----|-------------|
@@ -126,27 +128,86 @@ This document specifies the complete functional and non-functional requirements 
 | SCH-02 | Maximum scheme file size shall be 5 MB |
 | SCH-03 | The server shall extract text from the scheme file (`pdf-parse` for PDF, `mammoth` for .docx) |
 | SCH-04 | If text extraction yields no content, the server shall return HTTP 422: "Could not extract text from this file." |
-| SCH-05 | The extracted text shall be passed to the LLM with a dedicated parsing prompt that extracts question types, counts, and marks per question |
-| SCH-06 | The LLM output shall be parsed into a `parsedConfig` array matching the `TypeConfig` Zod schema; invalid output returns HTTP 422: "Could not parse a valid question configuration from this scheme." |
-| SCH-07 | A saved scheme shall be associated with the Teacher who uploaded it; no other user may access or modify it |
-| SCH-08 | A Teacher may save multiple schemes; they are listed and selectable when creating a new question set |
-| SCH-09 | A saved scheme shall persist until the Teacher explicitly replaces it (`PATCH /api/schemes/:id/replace`) or deletes it (`DELETE /api/schemes/:id`) — the Teacher is never prompted to re-upload automatically |
-| SCH-10 | When a Teacher creates a new question set, saved schemes shall be listed as a picker; selecting one pre-fills the type configurator with the scheme's `parsedConfig` without any upload prompt |
-| SCH-11 | Pre-filled values from a scheme are always editable by the Teacher before generation is triggered |
-| SCH-12 | The `schemeId` of the selected scheme shall be stored on the `QuestionSet` document for audit purposes |
-| SCH-13 | Deleting a scheme shall not affect `QuestionSet` documents that previously used it — those sets retain their own `typeConfig` |
-| SCH-14 | Scheme upload and management is available only to the `teacher` role |
+| SCH-05 | The extracted text shall be passed to `inferExamBlueprint()` — a board-agnostic LLM prompt that infers the full exam structure without assuming CBSE or any specific board |
+| SCH-06 | The inferred blueprint shall include: examBoard, institutionType, subject, standard, examType, durationMinutes, totalMarks, tone, difficultyDefault, chapter list with weights, and per-section question type/count/marks/difficulty/Bloom's distribution |
+| SCH-07 | The blueprint shall be converted to `TypeConfig[]` via `blueprintToTypeConfig()` for pre-filling the type configurator |
+| SCH-08 | If full blueprint parsing fails, the system shall fall back to legacy `TypeConfig[]` parsing; if that also fails, return HTTP 422: "Could not parse a valid question configuration from this scheme." |
+| SCH-09 | A saved scheme shall be associated with the Teacher who uploaded it; no other user may access or modify it |
+| SCH-10 | A Teacher may save multiple schemes; they are listed and selectable when creating a new question set |
+| SCH-11 | A saved scheme shall persist until the Teacher explicitly replaces it or deletes it — the Teacher is never prompted to re-upload automatically |
+| SCH-12 | When a Teacher creates a new question set, saved schemes shall be listed as a picker; selecting one pre-fills the type configurator with the blueprint's `parsedConfig` without any upload prompt |
+| SCH-13 | Pre-filled values from a scheme are always editable by the Teacher before generation is triggered |
+| SCH-14 | The `schemeId` of the selected scheme shall be stored on the `QuestionSet` document for audit purposes |
+| SCH-15 | Deleting a scheme shall not affect `QuestionSet` documents that previously used it — those sets retain their own `typeConfig` |
+| SCH-16 | Scheme upload and management is available only to the `teacher` role |
 
 **Edge Cases:**
-- Teacher uploads a scheme with section headings but no explicit marks: LLM returns best-effort `parsedConfig`; Teacher must review and adjust before generating
-- Teacher skips saving the scheme: it is used to pre-fill the current set only; no `Scheme` document is created; `schemeId` on the `QuestionSet` is null
+- Teacher uploads a scheme with section headings but no explicit marks: LLM returns best-effort blueprint; Teacher reviews and adjusts before generating
+- Teacher skips saving the scheme: used to pre-fill the current set only; no `Scheme` document created; `schemeId` on the `QuestionSet` is null
 - Two Teachers upload schemes with the same name: no conflict — schemes are scoped per `teacherId`
+- Document is from an unrecognised board: `examBoard` field populated with whatever the LLM infers; no error if board is unknown
+
+---
+
+## 5a. Textbook & Chapter Requirements
+
+| ID | Requirement |
+|----|-------------|
+| TBK-01 | `POST /api/textbooks/upload` shall accept PDF files up to 50 MB |
+| TBK-02 | The server shall extract text page-by-page using `pdf-parse` to enable boundary detection |
+| TBK-03 | Chapter detection shall use three methods in priority order: (1) PDF bookmark outline, (2) heuristic heading detection, (3) LLM-based detection. The highest-confidence method available shall be used |
+| TBK-04 | If no chapter structure can be detected, the server shall return HTTP 422: "Could not detect any chapter structure in this textbook. Try uploading chapters individually instead." |
+| TBK-05 | Detected chapters shall be stored as a `TextbookUploadDraft` with candidate entries (tempId, suggestedTitle, suggestedNumber, startOffset, endOffset, detectionMethod) |
+| TBK-06 | `POST /api/textbooks/:draftId/confirm` shall accept a teacher-reviewed list of chapters with final titles, numbers, and weight percentages; optional merge and exclude operations are supported |
+| TBK-07 | On confirm, a `TextbookChapter` document shall be created for each active chapter, storing: teacherId, subject, title, chapterNumber, weightPercent, sourceText, highValueSnippets |
+| TBK-08 | The `TextbookUploadDraft` document shall be deleted after successful confirmation |
+| TBK-09 | `POST /api/chapters/upload` shall accept a single-chapter PDF (bypasses the draft/confirm flow) with subject, title, chapterNumber, and weightPercent supplied directly |
+| TBK-10 | A Teacher may store multiple chapters across multiple subjects |
+| TBK-11 | When generating, if `chapterIds[]` is provided, the server shall concatenate the `sourceText` of those chapters (in chapter-number order) and use the result as the generation source instead of the set's uploaded `sourceText` |
+| TBK-12 | Chapter weight percentages shall influence question distribution when multiple chapters are selected: chapters with higher weight receive proportionally more questions |
+| TBK-13 | Textbook upload and chapter management is available only to the `teacher` role |
+
+**Edge Cases:**
+- Textbook has no bookmarks and no clear heading pattern: LLM detection used as last resort
+- Teacher excludes all detected chapters: server returns 400 "No chapters remain after applying excludedTempIds."
+- Teacher selects chapters from different subjects for one generation run: allowed; generation uses the concatenated text regardless of subject tags
+- Chapter weights do not sum to 100%: a warning is returned but the operation is not blocked
+
+---
+
+## 5b. Reference Bank Requirements
+
+| ID | Requirement |
+|----|-------------|
+| REFB-01 | `POST /api/reference-bank/upload` shall accept PDF files containing previous year papers or model papers |
+| REFB-02 | The server shall extract text from the uploaded paper and pass it to `parsePaperIntoQuestions()` — an LLM call that segments the paper into individual question objects, each tagged with a `questionType` |
+| REFB-03 | Each parsed question shall be stored as a `ReferenceExemplar` with: teacherId, bankId, questionType, rawText, subject, sourceYear, chapterId |
+| REFB-04 | If no recognisable questions are found after parsing, the server shall return HTTP 422: "No recognisable questions found in the uploaded paper." |
+| REFB-05 | A teacher may group exemplars under a named bank using the `bankId` field (e.g. "CBSE-2023", "Maharashtra-Board") |
+| REFB-06 | A teacher may upload multiple papers to the same bank; exemplars accumulate |
+| REFB-07 | When generating with a `bankId` provided, the generator shall retrieve up to 3 exemplars per question type from that bank and inject them into the type's generation prompt as format examples |
+| REFB-08 | Exemplar injection shall use this format in the prompt: "Here are examples of how [type] questions appear in this exam pattern:" followed by the raw exemplar text |
+| REFB-09 | If no exemplars of a given type exist in the selected bank, that type's prompt is generated without exemplar context — no error |
+| REFB-10 | Reference bank upload and management is available only to the `teacher` role |
+| REFB-11 | A teacher's exemplars are private — not visible to or usable by other teachers |
 
 ---
 
 ## 6. Question Generation Requirements
 
-### 5.1 Count Enforcement
+### 6.0 Generation Inputs
+
+| ID | Requirement |
+|----|-------------|
+| GEN-IN-01 | `POST /api/sets/:id/generate` shall accept all three input channels in a single request: `typeConfig` (from blueprint or manual), `chapterIds[]` (from textbook), and `bankId` (from reference bank) |
+| GEN-IN-02 | All three inputs are optional individually — the teacher may provide any combination: all three, two, one, or none (falls back to set's uploaded sourceText with manual typeConfig) |
+| GEN-IN-03 | When `chapterIds[]` is provided, the chapter sourceTexts shall be concatenated in chapter-number order and used as the generation source for all types in this run |
+| GEN-IN-04 | When `bankId` is provided, the generator shall retrieve relevant exemplars per type before calling the LLM, and inject them into each type's prompt |
+| GEN-IN-05 | `tone` (formal-board-exam | neutral | conversational) and `difficultyDefault` (easy | moderate | hard) shall be accepted as top-level generation parameters and passed to each type's prompt |
+| GEN-IN-06 | Individual types in `typeConfig` may override `difficultyDefault` with their own `difficulty` field |
+| GEN-IN-07 | The `QuestionSet` document shall record which `chapterIds`, `bankId`, `tone`, and `difficultyDefault` were used for each generation run |
+
+### 6.1 Count Enforcement
 
 | ID | Requirement |
 |----|-------------|

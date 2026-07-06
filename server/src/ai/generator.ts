@@ -1,7 +1,7 @@
 import Groq from 'groq-sdk';
 import { validateQuestionBlock, assignGlobalIds, QuestionBlock } from '../validation/index.js';
 import { QuestionType } from '../validation/schemaMap.js';
-import { buildPrompt } from './prompts.js';
+import { buildPrompt, PromptContext } from './prompts.js';
 import { withRetry, withTimeout } from '../lib/retry.js';
 import { allocateSlots, ChapterInput } from './slotAllocator.js';
 import { pickStrategy, Strategy } from './strategyPicker.js';
@@ -18,12 +18,9 @@ const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile';
 
 type ToneOption = 'formal-board-exam' | 'neutral' | 'conversational';
 
-export interface GenerationContext {
-  difficulty?:      string;
-  tone?:            string;
-  bankId?:          string;
-  teacherId?:       string;
-  subjectHint?:     string;
+export interface GenerationContext extends PromptContext {
+  // strategyContext is separate from strategy/baseQuestion in PromptContext:
+  // it carries the same values to validateQuestionBlock for similarity checks.
   strategyContext?: { strategy: Strategy; baseQuestion: string | null };
 }
 
@@ -140,20 +137,9 @@ async function callGroq(
   return { questions: parseAiJsonArray(raw), tokens };
 }
 
-function resolvePromptArgs(context: GenerationContext | undefined) {
-  return {
-    teacherId:  context?.teacherId  ?? '',
-    difficulty: (context?.difficulty ?? 'moderate') as 'easy' | 'moderate' | 'hard',
-    tone:       (context?.tone       ?? 'formal-board-exam') as 'formal-board-exam' | 'neutral' | 'conversational',
-    bankId:     context?.bankId,
-    subjectHint: context?.subjectHint,
-  };
-}
-
 // Convenience export for one-off calls (no token tracking).
-export const realGenerateFn: GenerateFn = async (sourceText, type, count, _marks, dedupeHint, context) => {
-  const { teacherId, difficulty, tone, bankId, subjectHint } = resolvePromptArgs(context);
-  const { system, user } = await buildPrompt(type, sourceText, count, teacherId, difficulty, tone, bankId, subjectHint, dedupeHint);
+export const realGenerateFn: GenerateFn = async (sourceText, type, count, marks, dedupeHint, context) => {
+  const { system, user } = await buildPrompt(type, sourceText, count, marks, { ...context, dedupeHint });
   const { questions } = await callGroq(type, system, user);
   return questions;
 };
@@ -163,9 +149,8 @@ export const realGenerateFn: GenerateFn = async (sourceText, type, count, _marks
 // completes to obtain the total for that run.
 export function makeTrackedGenerateFn(): { generateFn: GenerateFn; getTokensUsed: () => number } {
   let tokensUsed = 0;
-  const generateFn: GenerateFn = async (sourceText, type, count, _marks, dedupeHint, context) => {
-    const { teacherId, difficulty, tone, bankId, subjectHint } = resolvePromptArgs(context);
-    const { system, user } = await buildPrompt(type, sourceText, count, teacherId, difficulty, tone, bankId, subjectHint, dedupeHint);
+  const generateFn: GenerateFn = async (sourceText, type, count, marks, dedupeHint, context) => {
+    const { system, user } = await buildPrompt(type, sourceText, count, marks, { ...context, dedupeHint });
     const { questions, tokens } = await callGroq(type, system, user);
     tokensUsed += tokens;
     return questions;
@@ -197,21 +182,16 @@ export async function generateTypeViaSlots(
       limiter(async () => {
         const { strategy, baseQuestion } = await pickStrategy(teacherId, slot.chapterId, type);
 
-        const slotGenerateFn: GenerateFn = async () => {
-          const { system, user } = await buildPrompt(
-            type,
-            slot.sourceExcerpt,
-            1,
+        const slotGenerateFn: GenerateFn = async (_src, _type, _count, marks) => {
+          const { system, user } = await buildPrompt(type, slot.sourceExcerpt, 1, marks, {
             teacherId,
-            slot.difficulty,
-            tone,
             bankId,
-            undefined,
-            undefined,
+            tone,
+            difficulty:   slot.difficulty,
+            chapterName:  slot.chapterName,
             strategy,
             baseQuestion,
-            slot.chapterName,
-          );
+          });
           const { questions } = await callGroq(type, system, user);
           return questions;
         };
@@ -249,7 +229,7 @@ export interface TypeConfig {
   type:             QuestionType;
   count:            number;
   marksPerQuestion: number;
-  difficulty?:      string;
+  difficulty?:      'easy' | 'moderate' | 'hard';
 }
 
 // Note: if ALL counts are 0 the route layer should reject before calling

@@ -154,4 +154,29 @@ router.post('/upload', async (req: Request, res: Response) => {
   });
 });
 
+// ── DELETE /api/reference-bank/:bankId ───────────────────────────────────────
+// Removes all exemplars in a bank owned by the requesting teacher.
+
+router.delete('/:bankId', async (req: Request, res: Response) => {
+  const { bankId } = req.params;
+  const result = await ReferenceExemplar.deleteMany({
+    teacherId: req.userId,
+    bankId,
+  });
+
+  if (result.deletedCount === 0) {
+    res.status(404).json({ error: 'Bank not found or no exemplars to delete.' });
+    return;
+  }
+
+  logger.info('reference_bank_deleted', {
+    requestId:    req.requestId,
+    userId:       req.userId,
+    bankId,
+    deletedCount: result.deletedCount,
+  });
+
+  res.status(200).json({ deleted: result.deletedCount });
+});
+
 export default router;

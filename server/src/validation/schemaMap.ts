@@ -6,6 +6,8 @@ import { MatchTheFollowingSchema } from './schemas/matchTheFollowing.js';
 import { ReorderingSchema }        from './schemas/reordering.js';
 import { SortingSchema }           from './schemas/sorting.js';
 import { TrueFalseSchema }         from './schemas/trueFalse.js';
+import { AssertionReasonSchema }   from './schemas/assertionReason.js';
+import { ShortAnswerSchema }       from './schemas/shortAnswer.js';
 
 export type QuestionType =
   | 'fillInBlanks'
@@ -14,14 +16,18 @@ export type QuestionType =
   | 'matchTheFollowing'
   | 'reordering'
   | 'sorting'
-  | 'trueFalse';
+  | 'trueFalse'
+  | 'assertionReason'
+  | 'shortAnswer';
 
 export const schemaMap: Record<QuestionType, z.ZodTypeAny> = {
-  fillInBlanks:       FillInBlanksSchema,
-  multipleChoice:     MultipleChoiceSchema,
-  multiSelect:        MultiSelectSchema,
-  matchTheFollowing:  MatchTheFollowingSchema,
-  reordering:         ReorderingSchema,
-  sorting:            SortingSchema,
-  trueFalse:          TrueFalseSchema,
+  fillInBlanks:      FillInBlanksSchema,
+  multipleChoice:    MultipleChoiceSchema,
+  multiSelect:       MultiSelectSchema,
+  matchTheFollowing: MatchTheFollowingSchema,
+  reordering:        ReorderingSchema,
+  sorting:           SortingSchema,
+  trueFalse:         TrueFalseSchema,
+  assertionReason:   AssertionReasonSchema,
+  shortAnswer:       ShortAnswerSchema,
 };

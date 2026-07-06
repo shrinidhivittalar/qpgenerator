@@ -85,10 +85,10 @@ function groqResp(questions: unknown[]) {
   };
 }
 
-// Detect question type from the buildPrompt system message
+// Detect question type from the machine-readable marker injected by buildPrompt
 function typeFromParams(params: any): string {
   const sys: string = params.messages?.[0]?.content ?? '';
-  const m = sys.match(/You generate (\w+) questions/);
+  const m = sys.match(/\[QUESTION_TYPE:(\w+)\]/);
   return m?.[1] ?? 'fillInBlanks';
 }
 

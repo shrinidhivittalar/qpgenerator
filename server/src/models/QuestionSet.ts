@@ -50,6 +50,7 @@ const QuestionSetSchema = new Schema(
     difficultyDefault:    { type: String, enum: ['easy', 'moderate', 'hard'], default: null },
     tone:                 { type: String, enum: ['formal-board-exam', 'neutral', 'conversational'], default: null },
     bankId:               { type: String, default: null },
+    chapterIds:           { type: [Schema.Types.ObjectId], ref: 'TextbookChapter', default: [] },
     hodId:                { type: Schema.Types.ObjectId, ref: 'User',    default: null },
     hodComment:           { type: String,   default: null },
     typesUnderRevision:   { type: [String], default: [] },

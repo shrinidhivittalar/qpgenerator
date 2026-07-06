@@ -284,37 +284,74 @@ Response
 
 ## 4. Generation Pipeline Architecture
 
-### 4.1 Overview
+### 4.1 Overview — Three Input Channels
 
-The generation pipeline processes each selected question type as an independent unit. Types are processed in parallel. Each type call goes through the same four-stage loop independently.
+The platform is board-agnostic. Generation is driven by three independent input channels that a teacher assembles before triggering generation:
 
 ```
-Teacher submits: { sourceText, typeConfig: [{ type, count, marksPerQuestion }] }
+ ┌─────────────────────────────┐
+ │  Channel 1: Blueprint       │  Scheme / past paper / model paper
+ │  blueprintInferencer.ts     │  → inferExamBlueprint()
+ │  → ExamBlueprint            │  → typeConfig (types, counts, marks, difficulty, tone)
+ │  → TypeConfig[]             │
+ └──────────────┬──────────────┘
+                │
+ ┌─────────────────────────────┐
+ │  Channel 2: Textbook        │  Full textbook or individual chapters
+ │  pdfStructure.ts            │  → bookmarks → heuristics → LLM detection
+ │  chapterHeuristics.ts       │  → TextbookChapter documents
+ │  chapterLlmDetection.ts     │
+ │  → sourceText (per chapter) │  Selected chapters' text concatenated at generation time
+ └──────────────┬──────────────┘
+                │
+ ┌─────────────────────────────┐
+ │  Channel 3: Reference Bank  │  Previous year papers / model papers
+ │  paperParser.ts             │  → parsePaperIntoQuestions()
+ │  → ReferenceExemplar[]      │  → exemplars injected per-type into Groq prompt
+ └──────────────┬──────────────┘
+                │
+                ▼
+ ┌─────────────────────────────────────────────────────────┐
+ │  generateSet(sourceText, typeConfig, exemplarContext)    │
+ │                                                         │
+ │  ├── Per type (parallel, Promise.allSettled):           │
+ │  │     runTypeLoop(                                      │
+ │  │       sourceText,        ← from chapters             │
+ │  │       type, count,       ← from blueprint            │
+ │  │       marksPerQuestion,  ← from blueprint            │
+ │  │       difficulty,        ← from blueprint            │
+ │  │       tone,              ← from blueprint            │
+ │  │       exemplars[]        ← from reference bank       │
+ │  │     )                                                 │
+ │  │                                                       │
+ │  └── assignGlobalIds() → return blocks + errors         │
+ └─────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Per-Type Generation Loop
+
+Each type call goes through the same four-stage loop independently.
+
+```
+runTypeLoop(sourceText, type, count, marksPerQuestion, difficulty, tone, exemplars)
     │
     ▼
-generateSet(sourceText, typeConfig)
+Build prompt:
+  - System: type schema + count enforcement + difficulty + tone instruction
+  - If exemplars provided: inject "Here are examples from this exam pattern: ..."
+  - User: sourceText (truncated to model context limit)
     │
-    ├── For each selected type (count > 0):  ──── parallel
-    │       │
-    │       runTypeLoop(sourceText, type, count, marksPerQuestion)
-    │           │
-    │           ▼
-    │       [Groq call] — withRetry(3) + withTimeout(30s)
-    │           │
-    │           ├── Parse and validate returned questions (Zod schema)
-    │           │
-    │           ├── [Count matches requested] ──► Trim to exact count, return
-    │           │
-    │           ├── [Count exceeds requested] ──► Trim to exact count, return
-    │           │
-    │           └── [Count short] ──► Retry with shortfall count (max 2 retries)
-    │                                  └── [Still short after retries] ──► FailedType error
+    ▼
+[Groq call] — withRetry(3) + withTimeout(30s)
     │
-    ├── Collect results (successes + failures)
+    ├── Parse and validate returned questions (Zod schema)
     │
-    ├── assignGlobalIds(allQuestions) — assign unique sequential IDs across all types
+    ├── [Count matches requested] ──► Trim to exact count, return
     │
-    └── Return: { blocks: QuestionBlock[], errors: PerTypeError[] }
+    ├── [Count exceeds requested] ──► Trim to exact count, return
+    │
+    └── [Count short] ──► Retry with shortfall count (max 2 retries)
+                           └── [Still short after retries] ──► FailedType error
 ```
 
 ### 4.2 Per-Type Prompt Design
@@ -442,6 +479,18 @@ requireRole(...allowedRoles)
 | GET /api/analytics | hod, principal |
 | GET /api/assessments | student |
 | GET /api/assessments/:id | student |
+| POST /api/schemes/upload | teacher |
+| GET /api/schemes | teacher |
+| PATCH /api/schemes/:id/replace | teacher |
+| DELETE /api/schemes/:id | teacher |
+| POST /api/textbooks/upload | teacher |
+| POST /api/textbooks/:draftId/confirm | teacher |
+| POST /api/chapters/upload | teacher |
+| GET /api/chapters | teacher |
+| DELETE /api/chapters/:id | teacher |
+| POST /api/reference-bank/upload | teacher |
+| GET /api/reference-bank | teacher |
+| DELETE /api/reference-bank/:bankId | teacher |
 
 ---
 

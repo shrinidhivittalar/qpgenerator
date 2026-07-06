@@ -10,14 +10,12 @@ afterEach(() => {
   vi.mocked(exemplarRetrieval.getExemplars).mockReset();
 });
 
-const BASE_ARGS = [
-  'multipleChoice',           // type
-  'Some source content.',     // sourceText
-  3,                          // count
-  'teacher-1',                // teacherId
-  'moderate' as const,        // difficulty
-  'neutral' as const,         // tone
-] as const;
+// Shared base context used across all tests
+const BASE_CTX = {
+  teacherId:  'teacher-1',
+  difficulty: 'moderate' as const,
+  tone:       'neutral'  as const,
+};
 
 describe('buildPrompt — strategy=reuse', () => {
   it('includes the base question verbatim and the "changing nothing" instruction', async () => {
@@ -25,12 +23,8 @@ describe('buildPrompt — strategy=reuse', () => {
     const baseQ = 'State and explain Newton\'s second law of motion.';
 
     const { system } = await buildPrompt(
-      ...BASE_ARGS,
-      undefined, // bankId
-      undefined, // subjectHint
-      undefined, // dedupeHint
-      'reuse',
-      baseQ,
+      'multipleChoice', 'Some source content.', 3, 1,
+      { ...BASE_CTX, strategy: 'reuse', baseQuestion: baseQ },
     );
 
     expect(system).toContain(baseQ);
@@ -42,9 +36,10 @@ describe('buildPrompt — strategy=fresh', () => {
   it('adds no strategy instruction block (clean no-op, backward-compatible)', async () => {
     vi.mocked(exemplarRetrieval.getExemplars).mockResolvedValue([]);
 
-    const { system } = await buildPrompt(...BASE_ARGS);
+    const { system } = await buildPrompt(
+      'multipleChoice', 'Some source content.', 3, 1, BASE_CTX,
+    );
 
-    // None of the strategy-specific phrases should appear
     expect(system).not.toContain('appeared in a previous exam');
     expect(system).not.toContain('from a different angle');
     expect(system).not.toContain('changing nothing');
@@ -57,10 +52,8 @@ describe('buildPrompt — strategy=rephrase', () => {
     const baseQ = 'Define osmosis.';
 
     const { system } = await buildPrompt(
-      ...BASE_ARGS,
-      undefined, undefined, undefined,
-      'rephrase',
-      baseQ,
+      'multipleChoice', 'Some source content.', 3, 1,
+      { ...BASE_CTX, strategy: 'rephrase', baseQuestion: baseQ },
     );
 
     expect(system).toContain(baseQ);
@@ -75,10 +68,8 @@ describe('buildPrompt — strategy=variant', () => {
     const baseQ = 'Explain the process of mitosis.';
 
     const { system } = await buildPrompt(
-      ...BASE_ARGS,
-      undefined, undefined, undefined,
-      'variant',
-      baseQ,
+      'multipleChoice', 'Some source content.', 3, 1,
+      { ...BASE_CTX, strategy: 'variant', baseQuestion: baseQ },
     );
 
     expect(system).toContain(baseQ);
@@ -91,28 +82,23 @@ describe('buildPrompt — chapterName', () => {
     vi.mocked(exemplarRetrieval.getExemplars).mockResolvedValue([]);
 
     const { user } = await buildPrompt(
-      ...BASE_ARGS,
-      undefined, undefined, undefined,
-      'fresh', null,
-      'Chapter 3: Laws of Motion',
+      'multipleChoice', 'Some source content.', 3, 1,
+      { ...BASE_CTX, chapterName: 'Chapter 3: Laws of Motion' },
     );
 
-    expect(user).toContain('This question should be based on material from the chapter "Chapter 3: Laws of Motion".');
-    expect(user).toContain('Source material:');
-    // Chapter line comes before the source material
-    expect(user.indexOf('Chapter 3')).toBeLessThan(user.indexOf('Source material:'));
+    expect(user).toContain('Chapter 3: Laws of Motion');
+    expect(user).toContain('SOURCE TEXT:');
+    expect(user.indexOf('Chapter 3')).toBeLessThan(user.indexOf('SOURCE TEXT:'));
   });
 
-  it('omits chapter prefix when chapterName is empty (no-chapters backward-compat path)', async () => {
+  it('omits chapter prefix when chapterName is absent (no-chapters backward-compat path)', async () => {
     vi.mocked(exemplarRetrieval.getExemplars).mockResolvedValue([]);
 
     const { user } = await buildPrompt(
-      ...BASE_ARGS,
-      undefined, undefined, undefined,
-      'fresh', null, '',
+      'multipleChoice', 'Some source content.', 3, 1, BASE_CTX,
     );
 
-    expect(user).not.toContain('This question should be based on material from');
-    expect(user.startsWith('Source material:')).toBe(true);
+    expect(user).not.toContain('chapter');
+    expect(user.startsWith('SOURCE TEXT:')).toBe(true);
   });
 });
