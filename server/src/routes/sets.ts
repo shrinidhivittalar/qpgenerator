@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 
 import { requireRole } from '../middleware/requireRole.js';
 import { QuestionSet } from '../models/QuestionSet.js';
+import { User } from '../models/User.js';
 import { GenerationRun } from '../models/GenerationRun.js';
 import Scheme from '../models/Scheme.js';
 import TextbookChapter from '../models/TextbookChapter.js';
@@ -11,6 +12,7 @@ import {
   generateSet, generateTypeViaSlots, runTypeLoop, makeTrackedGenerateFn, TypeConfig,
 } from '../ai/generator.js';
 import { generatePaper } from '../ai/paperGenerator.js';
+import { buildQuestionPaperDoc } from '../ai/wordExporter.js';
 import { createLimiter } from '../lib/concurrency.js';
 import { assignGlobalIds, QuestionBlock, QuestionType } from '../validation/index.js';
 import { schemaMap } from '../validation/schemaMap.js';
@@ -45,6 +47,34 @@ const GenerateBodySchema = z.object({
 
 const RegenerateBodySchema = z.object({
   type: z.string(),
+});
+
+// ── POST /api/sets/create ─────────────────────────────────────────────────────
+// Creates an empty QuestionSet for chapter-based mode where no source PDF is
+// needed — chapters supply the source text at generation time.
+
+router.post('/create', requireRole('teacher'), async (req: Request, res: Response) => {
+  const userId = (req as any).userId as string;
+  try {
+    const teacher = await User.findById(userId).lean();
+    const set = await QuestionSet.create({
+      teacherId:  userId,
+      department: (teacher as any)?.department || 'General',
+      sourceText: 'chapter-based',
+      fileName:   'Chapter-based generation',
+      status:     'draft',
+    });
+    res.status(201).json({
+      setId:       set._id.toString(),
+      fileName:    set.fileName,
+      wordCount:   0,
+      previewText: '',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('sets_create_failed', { userId, error: msg });
+    res.status(500).json({ error: `Failed to create session: ${msg}` });
+  }
 });
 
 // ── POST /api/sets/:id/generate ───────────────────────────────────────────────
@@ -517,6 +547,47 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
     filledSlots:    result.filledSlots,
     failedSlots:    result.failedSlots,
   });
+});
+
+// ── GET /api/sets/:id/export/paper ────────────────────────────────────────────
+// Generates and downloads a .docx question paper from the filled PaperStructure.
+// Contains two parts: student-facing question paper (no answers) + answer key.
+
+router.get('/:id/export/paper', requireRole('teacher'), async (req: Request, res: Response) => {
+  const userId = (req as any).userId as string;
+
+  const set = await QuestionSet.findById(req.params.id);
+  if (!set) { res.status(404).json({ error: 'Question set not found.' }); return; }
+  if (set.teacherId.toString() !== userId) {
+    res.status(403).json({ error: 'Access denied.' }); return;
+  }
+
+  const structure = (set as any).paperStructure as object | null;
+  if (!structure) {
+    res.status(404).json({ error: 'No generated paper found. Generate a paper first.' }); return;
+  }
+
+  const structureResult = PaperStructureSchema.safeParse(structure);
+  if (!structureResult.success) {
+    res.status(500).json({ error: 'Stored paper structure is invalid.' }); return;
+  }
+
+  try {
+    const buffer = await buildQuestionPaperDoc(structureResult.data);
+    const safeTitle = (structureResult.data.title || 'question-paper')
+      .replace(/[^\w\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .slice(0, 60);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.docx"`);
+    res.send(buffer);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('paper_export_failed', { userId, setId: req.params.id, error: msg });
+    res.status(500).json({ error: 'Failed to generate Word document.' });
+  }
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -59,6 +59,22 @@ export function useGeneration() {
     exportError:            null,
   });
 
+  const createSet = useCallback(async (): Promise<void> => {
+    const res = await apiFetch('/api/sets/create', { method: 'POST' });
+    if (!res.ok) {
+      const body = await res.json() as { error?: string };
+      throw new Error(body.error ?? 'Failed to initialise session.');
+    }
+    const data = await res.json() as { setId: string; fileName: string; wordCount: number; previewText: string };
+    setState(s => ({
+      ...s,
+      setId:       data.setId,
+      fileName:    data.fileName,
+      wordCount:   data.wordCount,
+      previewText: data.previewText,
+    }));
+  }, []);
+
   const uploadFile = useCallback(async (file: File): Promise<void> => {
     const form = new FormData();
     form.append('file', file);
@@ -129,7 +145,16 @@ export function useGeneration() {
     });
 
     try {
-      const { setId, typeConfig, activeSchemeId, difficultyDefault, tone, bankId } = state;
+      let { setId, typeConfig, activeSchemeId, difficultyDefault, tone, bankId } = state;
+
+      // Lazily create the server-side session if not yet initialised.
+      if (!setId) {
+        const cr = await apiFetch('/api/sets/create', { method: 'POST' });
+        if (!cr.ok) throw new Error('Failed to initialise session.');
+        const cd = await cr.json() as { setId: string };
+        setId = cd.setId;
+        setState(s => ({ ...s, setId }));
+      }
 
       const res = await apiFetch(`/api/sets/${setId}/generate`, {
         method:  'POST',
@@ -278,7 +303,16 @@ export function useGeneration() {
     }));
 
     try {
-      const { setId, activePaperStructure, tone } = state;
+      let { setId, activePaperStructure, tone } = state;
+
+      if (!setId) {
+        const cr = await apiFetch('/api/sets/create', { method: 'POST' });
+        if (!cr.ok) throw new Error('Failed to initialise session.');
+        const cd = await cr.json() as { setId: string };
+        setId = cd.setId;
+        setState(s => ({ ...s, setId }));
+      }
+
       const res = await apiFetch(`/api/sets/${setId}/generate-paper`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -340,6 +374,7 @@ export function useGeneration() {
 
   return {
     state,
+    createSet,
     uploadFile,
     setTypeConfig,
     setIntent,

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useGeneration } from '../hooks/useGeneration';
 import { apiFetch } from '../lib/api';
-import UploadPanel from '../components/UploadPanel';
 import SchemePicker from '../components/SchemePicker';
 import TypeConfigurator from '../components/TypeConfigurator';
 import GenerationProgress from '../components/GenerationProgress';
@@ -22,9 +21,9 @@ function Spinner({ className = 'w-4 h-4' }: { className?: string }) {
 
 export default function DashboardPage() {
   const { user, logout } = useAuth();
-  const { state, uploadFile, setTypeConfig, setIntent, applyScheme, generate, generatePaper, editQuestion, regenerateType } = useGeneration();
+  const { state, setTypeConfig, setIntent, applyScheme, generate, generatePaper, editQuestion, regenerateType } = useGeneration();
   const {
-    setId, fileName, wordCount, typeConfig, results, isGenerating, isRegenerating, exportError,
+    setId, typeConfig, results, isGenerating, isRegenerating, exportError,
     difficultyDefault, tone, bankId, activeSchemeId,
     activePaperStructure, filledPaperStructure, isPaperGenerating, paperGenerateError, paperStats,
   } = state;
@@ -32,7 +31,36 @@ export default function DashboardPage() {
   // Paper mode is active when the applied scheme has a parsed paper structure
   const isPaperMode = Boolean(activePaperStructure);
 
-  const [regenToast, setRegenToast] = useState<{ type: string; ok: boolean; msg: string } | null>(null);
+  const [regenToast,        setRegenToast]        = useState<{ type: string; ok: boolean; msg: string } | null>(null);
+  const [downloadingPaper,  setDownloadingPaper]  = useState(false);
+
+  async function handleDownloadPaper() {
+    if (!setId) return;
+    setDownloadingPaper(true);
+    try {
+      const res = await apiFetch(`/api/sets/${setId}/export/paper`);
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        showToast('export', false, body.error ?? 'Download failed.');
+        return;
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      const disposition = res.headers.get('Content-Disposition') ?? '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      a.download = match?.[1] ?? 'question-paper.docx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      showToast('export', false, 'Download failed.');
+    } finally {
+      setDownloadingPaper(false);
+    }
+  }
 
   function showToast(type: string, ok: boolean, msg: string) {
     setRegenToast({ type, ok, msg });
@@ -47,12 +75,6 @@ export default function DashboardPage() {
   // ── Scheme step state ──────────────────────────────────────────────────────
   const [schemeStep, setSchemeStep] = useState<'pending' | 'done'>('pending');
 
-  function handleUpload(file: File) {
-    setSchemeStep('pending');
-    setSelectedChapterIds(new Set());
-    return uploadFile(file);
-  }
-
   function handleSchemeApply(parsedConfig: TypeConfig[], schemeId?: string, paperStructure?: PaperStructure | null) {
     applyScheme(parsedConfig, schemeId ?? null, paperStructure ?? null);
     setSchemeStep('done');
@@ -62,17 +84,18 @@ export default function DashboardPage() {
     setSchemeStep('done');
   }
 
-  const canGenerate =
-    !isGenerating && Boolean(setId) && schemeStep === 'done' && typeConfig.some(c => c.count > 0);
-
   // ── Chapter state ──────────────────────────────────────────────────────────
   const [chapters,        setChapters]        = useState<ChapterInfo[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(true);
   const [totalWeight,     setTotalWeight]     = useState(0);
   const [selectedChapterIds, setSelectedChapterIds] = useState<Set<string>>(new Set());
 
+  const canGenerate =
+    !isGenerating && schemeStep === 'done' &&
+    typeConfig.some(c => c.count > 0) && selectedChapterIds.size > 0;
+
   const canGeneratePaper =
-    !isPaperGenerating && Boolean(setId) && schemeStep === 'done' && selectedChapterIds.size > 0;
+    !isPaperGenerating && schemeStep === 'done' && selectedChapterIds.size > 0;
 
   // Upload form
   const [showChapterForm,  setShowChapterForm]  = useState(false);
@@ -169,6 +192,21 @@ export default function DashboardPage() {
   const [deletingBankId,  setDeletingBankId]  = useState<string | null>(null);
   const bankFileRef = useRef<HTMLInputElement>(null);
 
+  // ── Textbook auto-split state ──────────────────────────────────────────────
+  type DraftChapter = {
+    tempId: string; title: string; chapterNumber: number;
+    weightPercent: number; preview: string; wordCount: number; excluded: boolean;
+  };
+  const [textbookDraft,       setTextbookDraft]       = useState<{ draftId: string; detectionMethod: string; fileName: string } | null>(null);
+  const [draftChapters,       setDraftChapters]       = useState<DraftChapter[]>([]);
+  const [textbookUploading,   setTextbookUploading]   = useState(false);
+  const [textbookUploadError, setTextbookUploadError] = useState<string | null>(null);
+  const [confirmingDraft,     setConfirmingDraft]     = useState(false);
+  const [showTextbookForm,    setShowTextbookForm]    = useState(false);
+  const [textbookFile,        setTextbookFile]        = useState<File | null>(null);
+  const [textbookSubject,     setTextbookSubject]     = useState('');
+  const textbookFileRef = useRef<HTMLInputElement>(null);
+
   async function loadBanks() {
     setBanksLoading(true);
     try {
@@ -223,6 +261,79 @@ export default function DashboardPage() {
       setBanks(bs => bs.filter(b => b.id !== bankId));
     } finally {
       setDeletingBankId(null);
+    }
+  }
+
+  async function handleTextbookUpload(e: FormEvent) {
+    e.preventDefault();
+    if (!textbookFile)           { setTextbookUploadError('Select a PDF file.');   return; }
+    if (!textbookSubject.trim()) { setTextbookUploadError('Subject is required.'); return; }
+    setTextbookUploadError(null);
+    setTextbookUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file',    textbookFile);
+      form.append('subject', textbookSubject.trim());
+      const res  = await apiFetch('/api/textbooks/upload', { method: 'POST', body: form });
+      const body = await res.json() as {
+        draftId: string; detectionMethod: string;
+        chapters: Array<{ tempId: string; suggestedTitle: string; suggestedNumber: number; preview: string; wordCount: number }>;
+        error?: string;
+      };
+      if (!res.ok) { setTextbookUploadError(body.error ?? 'Upload failed.'); return; }
+      const n    = body.chapters.length;
+      const base = Math.floor(100 / n);
+      const rem  = 100 % n;
+      setDraftChapters(body.chapters.map((c, i) => ({
+        tempId:        c.tempId,
+        title:         c.suggestedTitle,
+        chapterNumber: c.suggestedNumber,
+        weightPercent: base + (i < rem ? 1 : 0),
+        preview:       c.preview,
+        wordCount:     c.wordCount,
+        excluded:      false,
+      })));
+      setTextbookDraft({ draftId: body.draftId, detectionMethod: body.detectionMethod, fileName: textbookFile.name });
+      setShowTextbookForm(false);
+      setTextbookFile(null);
+      setTextbookSubject('');
+      if (textbookFileRef.current) textbookFileRef.current.value = '';
+    } catch {
+      setTextbookUploadError('Upload failed.');
+    } finally {
+      setTextbookUploading(false);
+    }
+  }
+
+  async function handleConfirmDraft() {
+    if (!textbookDraft) return;
+    const active   = draftChapters.filter(c => !c.excluded);
+    const excluded = draftChapters.filter(c =>  c.excluded).map(c => c.tempId);
+    setConfirmingDraft(true);
+    setTextbookUploadError(null);
+    try {
+      const res = await apiFetch(`/api/textbooks/${textbookDraft.draftId}/confirm`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          chapters: active.map(c => ({
+            tempId: c.tempId, title: c.title, chapterNumber: c.chapterNumber, weightPercent: c.weightPercent,
+          })),
+          excludedTempIds: excluded,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        setTextbookUploadError(body.error ?? 'Failed to save chapters.');
+        return;
+      }
+      setTextbookDraft(null);
+      setDraftChapters([]);
+      await loadChapters();
+    } catch {
+      setTextbookUploadError('Failed to save chapters.');
+    } finally {
+      setConfirmingDraft(false);
     }
   }
 
@@ -322,21 +433,206 @@ export default function DashboardPage() {
         {/* ── Left: main generation flow ── */}
         <main className="space-y-8">
 
-          {/* Step 1 — Upload PDF */}
+          {/* Textbook draft review — replaces normal flow while a draft is pending */}
+          {textbookDraft && (
+            <section className="rounded-xl border border-indigo-200 bg-white p-5 space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-800">Review detected chapters</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {draftChapters.length} chapter{draftChapters.length !== 1 ? 's' : ''} detected
+                    via <span className="font-medium">{textbookDraft.detectionMethod}</span>
+                    {' · '}{textbookDraft.fileName}
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setTextbookDraft(null); setDraftChapters([]); }}
+                  className="text-xs text-gray-400 hover:text-gray-600 transition-colors shrink-0"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+                {draftChapters.map((ch, i) => (
+                  <div
+                    key={ch.tempId}
+                    className={[
+                      'rounded-lg border p-3 space-y-1.5',
+                      ch.excluded ? 'opacity-40 border-gray-200 bg-gray-50' : 'border-gray-200 bg-white',
+                    ].join(' ')}
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={!ch.excluded}
+                        onChange={() => setDraftChapters(chs => chs.map((c, j) => j === i ? { ...c, excluded: !c.excluded } : c))}
+                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 shrink-0"
+                      />
+                      <input
+                        type="text"
+                        value={ch.title}
+                        disabled={ch.excluded}
+                        onChange={e => setDraftChapters(chs => chs.map((c, j) => j === i ? { ...c, title: e.target.value } : c))}
+                        className="flex-1 text-sm font-medium text-gray-800 border-0 border-b border-gray-200 focus:border-indigo-400 focus:outline-none bg-transparent py-0.5"
+                      />
+                      <span className="text-xs text-gray-400 shrink-0 w-6 text-center">#{ch.chapterNumber}</span>
+                      <div className="flex items-center gap-0.5 shrink-0">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={ch.weightPercent}
+                          disabled={ch.excluded}
+                          onChange={e => setDraftChapters(chs => chs.map((c, j) => j === i ? { ...c, weightPercent: parseInt(e.target.value) || 0 } : c))}
+                          className="w-11 text-xs text-center border border-gray-200 rounded px-1 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        />
+                        <span className="text-xs text-gray-400">%</span>
+                      </div>
+                    </div>
+                    {ch.preview && (
+                      <p className="text-xs text-gray-400 pl-6 line-clamp-2">{ch.preview}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                <div className="flex items-center gap-3">
+                  {(() => {
+                    const active = draftChapters.filter(c => !c.excluded);
+                    const total  = active.reduce((s, c) => s + c.weightPercent, 0);
+                    return (
+                      <span className={`text-xs ${Math.abs(total - 100) > 1 ? 'text-amber-600' : 'text-green-700'}`}>
+                        {active.length} chapter{active.length !== 1 ? 's' : ''} · {total}% weight
+                      </span>
+                    );
+                  })()}
+                  <button
+                    onClick={() => {
+                      const active = draftChapters.filter(c => !c.excluded);
+                      const n = active.length;
+                      if (n === 0) return;
+                      const base = Math.floor(100 / n);
+                      const rem  = 100 % n;
+                      let ai = 0;
+                      setDraftChapters(chs => chs.map(c => {
+                        if (c.excluded) return c;
+                        const w = base + (ai < rem ? 1 : 0);
+                        ai++;
+                        return { ...c, weightPercent: w };
+                      }));
+                    }}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors"
+                  >
+                    Distribute evenly
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setTextbookDraft(null); setDraftChapters([]); }}
+                    className="rounded-lg px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleConfirmDraft}
+                    disabled={confirmingDraft || draftChapters.filter(c => !c.excluded).length === 0}
+                    className="rounded-lg px-3 py-1.5 text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors"
+                  >
+                    {confirmingDraft
+                      ? 'Saving…'
+                      : `Save ${draftChapters.filter(c => !c.excluded).length} chapter${draftChapters.filter(c => !c.excluded).length !== 1 ? 's' : ''}`
+                    }
+                  </button>
+                </div>
+              </div>
+
+              {textbookUploadError && (
+                <p className="text-xs text-red-600">{textbookUploadError}</p>
+              )}
+            </section>
+          )}
+
+          {/* Normal flow — hidden while reviewing a textbook draft */}
+          {!textbookDraft && <>
+
+          {/* Step 1 — Select chapters */}
           <section className="space-y-3">
             <h2 className="text-base font-semibold text-gray-800">
-              <span className="text-indigo-500 mr-2">1</span>Upload source PDF
+              <span className="text-indigo-500 mr-2">1</span>Select chapters
             </h2>
-            <UploadPanel
-              onUpload={handleUpload}
-              fileName={fileName}
-              wordCount={wordCount}
-              disabled={isGenerating}
-            />
-          </section>
+              {chaptersLoading ? (
+                <div className="flex items-center gap-2 py-4 text-sm text-gray-400">
+                  <Spinner /> Loading chapters…
+                </div>
+              ) : chapters.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center space-y-2">
+                  <p className="text-sm font-medium text-gray-600">No chapters yet</p>
+                  <p className="text-xs text-gray-400">
+                    Click <span className="font-semibold text-indigo-600">+ Upload textbook</span> in the sidebar to auto-detect and save chapters from a PDF.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-gray-500">Choose which chapters to draw questions from</p>
+                    {selectedChapterIds.size > 0 && (
+                      <button
+                        onClick={() => setSelectedChapterIds(new Set())}
+                        className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                      >
+                        Clear all
+                      </button>
+                    )}
+                  </div>
+                  <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100">
+                    {chapters.map(ch => {
+                      const checked = selectedChapterIds.has(ch._id);
+                      return (
+                        <label
+                          key={ch._id}
+                          className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleChapter(ch._id)}
+                            className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                            disabled={isGenerating}
+                          />
+                          <span className="flex-1 min-w-0">
+                            <span className="text-sm font-medium text-gray-800">
+                              {ch.chapterNumber}. {ch.chapterName}
+                            </span>
+                            {ch.subject && <span className="ml-2 text-xs text-gray-400">{ch.subject}</span>}
+                          </span>
+                          <span className="text-xs text-gray-500 tabular-nums shrink-0">{ch.weightPercent}%</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {selectedChapterIds.size === 0 ? (
+                    <p className="text-xs text-amber-600">Select at least one chapter to continue.</p>
+                  ) : (() => {
+                    const selected = chapters.filter(c => selectedChapterIds.has(c._id));
+                    const selWeight = selected.reduce((s, c) => s + c.weightPercent, 0);
+                    const allZero = selected.every(c => c.weightPercent === 0);
+                    return (
+                      <p className="text-xs text-indigo-600">
+                        {selectedChapterIds.size} chapter{selectedChapterIds.size > 1 ? 's' : ''} selected
+                        {allZero
+                          ? ' — questions will be split equally'
+                          : ` (${selWeight}% weight)`}
+                      </p>
+                    );
+                  })()}
+                </>
+              )}
+            </section>
 
           {/* Step 2 — Scheme picker */}
-          {setId && schemeStep === 'pending' && (
+          {schemeStep === 'pending' && selectedChapterIds.size > 0 && (
             <section className="space-y-3">
               <h2 className="text-base font-semibold text-gray-800">
                 <span className="text-indigo-500 mr-2">2</span>Select question paper scheme
@@ -350,80 +646,8 @@ export default function DashboardPage() {
             </section>
           )}
 
-          {/* Chapter selection — optional in normal mode, required in paper mode */}
-          {setId && schemeStep === 'done' && chapters.length > 0 && (
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-base font-semibold text-gray-800">
-                  {isPaperMode ? 'Select chapters' : 'Focus generation on specific chapters'}
-                  {!isPaperMode && <span className="ml-2 text-xs font-normal text-gray-400">(optional)</span>}
-                  {isPaperMode  && <span className="ml-2 text-xs font-normal text-red-400">required</span>}
-                </h2>
-                {selectedChapterIds.size > 0 && (
-                  <button
-                    onClick={() => setSelectedChapterIds(new Set())}
-                    className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-                  >
-                    Clear selection
-                  </button>
-                )}
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-white divide-y divide-gray-100">
-                {chapters.map(ch => {
-                  const checked = selectedChapterIds.has(ch._id);
-                  return (
-                    <label
-                      key={ch._id}
-                      className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => toggleChapter(ch._id)}
-                        className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
-                        disabled={isGenerating}
-                      />
-                      <span className="flex-1 min-w-0">
-                        <span className="text-sm font-medium text-gray-800">
-                          {ch.chapterNumber}. {ch.chapterName}
-                        </span>
-                        {ch.subject && (
-                          <span className="ml-2 text-xs text-gray-400">{ch.subject}</span>
-                        )}
-                      </span>
-                      <span className="text-xs text-gray-500 tabular-nums shrink-0">
-                        {ch.weightPercent}%
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-
-              {selectedChapterIds.size === 0 ? (
-                <p className={`text-xs ${isPaperMode ? 'text-amber-600' : 'text-gray-400'}`}>
-                  {isPaperMode
-                    ? 'Select at least one chapter to enable paper generation.'
-                    : 'No chapters selected — generation will use the full source PDF.'}
-                </p>
-              ) : (() => {
-                const selected = chapters.filter(c => selectedChapterIds.has(c._id));
-                const selWeight = selected.reduce((s, c) => s + c.weightPercent, 0);
-                const allZero = selected.every(c => c.weightPercent === 0);
-                return (
-                  <p className="text-xs text-indigo-600">
-                    {selectedChapterIds.size} chapter{selectedChapterIds.size > 1 ? 's' : ''} selected
-                    {allZero
-                      ? ' — weights are 0, questions will be split equally across chapters'
-                      : ` (${selWeight}% weight)`}
-                  </p>
-                );
-              })()}
-            </section>
-          )}
-
           {/* Step 3 — shown only when no scheme is applied (manual config) */}
-          {setId && schemeStep === 'done' && !activeSchemeId && (
+          {schemeStep === 'done' && !activeSchemeId && (
             <section className="space-y-3">
               <h2 className="text-base font-semibold text-gray-800">
                 <span className="text-indigo-500 mr-2">3</span>Configure question types
@@ -441,7 +665,7 @@ export default function DashboardPage() {
           )}
 
           {/* Paper structure preview — scheme with paperStructure applied */}
-          {setId && schemeStep === 'done' && isPaperMode && (
+          {schemeStep === 'done' && isPaperMode && (
             <section className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-semibold text-gray-800">
@@ -459,7 +683,7 @@ export default function DashboardPage() {
           )}
 
           {/* Scheme summary — scheme applied but no paperStructure (flat type list) */}
-          {setId && schemeStep === 'done' && activeSchemeId && !isPaperMode && typeConfig.length > 0 && (
+          {schemeStep === 'done' && activeSchemeId && !isPaperMode && typeConfig.length > 0 && (
             <section className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="text-base font-semibold text-gray-800">
@@ -488,7 +712,7 @@ export default function DashboardPage() {
           )}
 
           {/* Generate button — shown as soon as scheme step is done */}
-          {setId && schemeStep === 'done' && (
+          {schemeStep === 'done' && (
             isPaperMode ? (
               <>
                 {selectedChapterIds.size === 0 && (
@@ -582,9 +806,33 @@ export default function DashboardPage() {
           {/* Step 5 — Paper result (paper mode) OR Question blocks (normal mode) */}
           {isPaperMode && filledPaperStructure && (
             <section className="space-y-3">
-              <h2 className="text-base font-semibold text-gray-800">
-                <span className="text-indigo-500 mr-2">4</span>Generated paper
-              </h2>
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold text-gray-800">
+                  <span className="text-indigo-500 mr-2">4</span>Generated paper
+                </h2>
+                <button
+                  onClick={handleDownloadPaper}
+                  disabled={downloadingPaper}
+                  className={[
+                    'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors',
+                    downloadingPaper
+                      ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      : 'bg-green-600 text-white hover:bg-green-700',
+                  ].join(' ')}
+                >
+                  {downloadingPaper ? (
+                    <><Spinner className="w-3 h-3" />Preparing…</>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M12 10v6m0 0l-3-3m3 3l3-3M3 17v3a1 1 0 001 1h16a1 1 0 001-1v-3" />
+                      </svg>
+                      Download as Word
+                    </>
+                  )}
+                </button>
+              </div>
               <PaperView structure={filledPaperStructure} />
             </section>
           )}
@@ -610,6 +858,7 @@ export default function DashboardPage() {
               </div>
             </section>
           )}
+          </>}
         </main>
 
         {/* ── Right: sidebar ── */}
@@ -731,15 +980,73 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {/* Add chapter toggle */}
-            <button
-              onClick={() => { setShowChapterForm(v => !v); setChapterUploadError(null); }}
-              className="w-full text-left text-xs font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
-            >
-              {showChapterForm ? '− Cancel' : '+ Add chapter'}
-            </button>
+            {/* Add options — upload whole textbook or add a single chapter manually */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setShowTextbookForm(v => !v);
+                  setShowChapterForm(false);
+                  setTextbookUploadError(null);
+                }}
+                className={[
+                  'flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors text-center',
+                  showTextbookForm
+                    ? 'bg-indigo-100 text-indigo-800'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700',
+                ].join(' ')}
+              >
+                {showTextbookForm ? '− Cancel' : '+ Upload textbook'}
+              </button>
+              <button
+                onClick={() => {
+                  setShowChapterForm(v => !v);
+                  setShowTextbookForm(false);
+                  setChapterUploadError(null);
+                }}
+                className="text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors shrink-0"
+              >
+                {showChapterForm ? '− Cancel' : '+ Add manually'}
+              </button>
+            </div>
 
-            {/* Upload form */}
+            {/* Textbook upload form */}
+            {showTextbookForm && (
+              <form onSubmit={handleTextbookUpload} className="rounded-xl border border-indigo-100 bg-indigo-50 p-3 space-y-2">
+                <p className="text-xs text-gray-500">Upload a full textbook PDF — chapters will be detected automatically.</p>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Textbook PDF <span className="text-red-400">*</span></label>
+                  <input
+                    ref={textbookFileRef}
+                    type="file"
+                    accept="application/pdf"
+                    onChange={e => setTextbookFile(e.target.files?.[0] ?? null)}
+                    className="mt-1 block w-full text-xs text-gray-600 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-white file:text-gray-700 hover:file:bg-gray-100"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-medium">Subject <span className="text-red-400">*</span></label>
+                  <input
+                    type="text"
+                    value={textbookSubject}
+                    onChange={e => setTextbookSubject(e.target.value)}
+                    placeholder="e.g. Physics"
+                    className="mt-1 block w-full rounded-lg border border-gray-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                  />
+                </div>
+                {textbookUploadError && (
+                  <p className="text-xs text-red-600">{textbookUploadError}</p>
+                )}
+                <button
+                  type="submit"
+                  disabled={textbookUploading}
+                  className="w-full rounded-lg py-1.5 text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-1.5"
+                >
+                  {textbookUploading ? <><Spinner className="w-3 h-3" />Detecting chapters…</> : 'Detect chapters'}
+                </button>
+              </form>
+            )}
+
+            {/* Manual chapter upload form */}
             {showChapterForm && (
               <form onSubmit={handleChapterUpload} className="rounded-xl border border-indigo-100 bg-indigo-50 p-3 space-y-2">
                 {/* PDF file */}
