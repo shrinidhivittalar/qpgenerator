@@ -26,7 +26,7 @@ const router = Router();
 
 const VALID_TYPES = [
   'fillInBlanks', 'multipleChoice', 'multiSelect', 'matchTheFollowing',
-  'reordering', 'sorting', 'trueFalse', 'assertionReason', 'shortAnswer',
+  'reordering', 'sorting', 'trueFalse', 'assertionReason', 'shortAnswer', 'longAnswer',
 ] as const;
 
 const TypeConfigItemSchema = z.object({
