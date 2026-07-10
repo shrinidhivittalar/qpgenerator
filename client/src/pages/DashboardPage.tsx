@@ -11,7 +11,7 @@ import {
   Spinner, Card, CardHeader, SectionStep, EmptyState,
   WeightBar, InlineAlert, Divider,
 } from '../components/ui';
-import type { Scheme, TypeConfig, ChapterInfo, ReferenceBank, PaperStructure } from '../types';
+import type { Scheme, TypeConfig, ChapterInfo, ReferenceBank, PaperStructure, QuestionSetSummary, SetStatus } from '../types';
 
 // ── Lucide-style inline SVG icons (no extra dep) ──────────────────────────────
 const Icons = {
@@ -91,6 +91,306 @@ const Icons = {
     </svg>
   ),
 };
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+const STATUS_LABELS: Record<SetStatus, string> = {
+  draft:              'Draft',
+  generating:         'Generating',
+  review_pending:     'Pending Review',
+  revision_requested: 'Revision Requested',
+  approved:           'Approved',
+  archived:           'Archived',
+};
+
+const STATUS_COLOURS: Record<SetStatus, string> = {
+  draft:              'bg-slate-100 text-slate-600',
+  generating:         'bg-blue-100 text-blue-700',
+  review_pending:     'bg-amber-100 text-amber-700',
+  revision_requested: 'bg-orange-100 text-orange-700',
+  approved:           'bg-emerald-100 text-emerald-700',
+  archived:           'bg-slate-100 text-slate-400',
+};
+
+function StatusBadge({ status }: { status: SetStatus }) {
+  return (
+    <span className={`inline-block rounded-full px-2 py-0.5 text-2xs font-semibold ${STATUS_COLOURS[status]}`}>
+      {STATUS_LABELS[status]}
+    </span>
+  );
+}
+
+// ── Generic collapsible card ──────────────────────────────────────────────────
+
+function CollapsibleCard({
+  title, subtitle, icon, children,
+}: {
+  title:     string;
+  subtitle?: string;
+  icon:      React.ReactNode;
+  children:  React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-card border border-surface-200 bg-white shadow-card overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-50 transition-colors"
+      >
+        {icon}
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-semibold text-slate-800 leading-tight">{title}</p>
+          {subtitle && <p className="text-2xs text-slate-400 mt-0.5">{subtitle}</p>}
+        </div>
+        <svg
+          className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && <div className="border-t border-surface-100">{children}</div>}
+    </div>
+  );
+}
+
+// ── My Schemes collapsible card ───────────────────────────────────────────────
+
+function SchemesCard({
+  schemes, loading, activeSchemeId, replacing, deleting, deleteTarget,
+  replaceInputRef, onReplaceFile, onUse, onReplace, onDeleteClick, onDeleteConfirm, onDeleteCancel,
+}: {
+  schemes:         Scheme[];
+  loading:         boolean;
+  activeSchemeId:  string | null;
+  replacing:       boolean;
+  deleting:        boolean;
+  deleteTarget:    string | null;
+  replaceInputRef: React.RefObject<HTMLInputElement>;
+  onReplaceFile:   (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onUse:           (scheme: Scheme) => void;
+  onReplace:       (schemeId: string) => void;
+  onDeleteClick:   (schemeId: string) => void;
+  onDeleteConfirm: () => void;
+  onDeleteCancel:  () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="rounded-card border border-surface-200 bg-white shadow-card overflow-hidden">
+      {/* Hidden replace input — must stay in DOM regardless of open state */}
+      <input
+        ref={replaceInputRef}
+        type="file"
+        accept=".pdf,.docx"
+        className="hidden"
+        onChange={onReplaceFile}
+      />
+
+      {/* Header — click to toggle */}
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-50 transition-colors"
+      >
+        <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+            d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+        </svg>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-semibold text-slate-800 leading-tight">My Schemes</p>
+          {!loading && schemes.length > 0 && (
+            <p className="text-2xs text-slate-400 mt-0.5">{schemes.length} scheme{schemes.length !== 1 ? 's' : ''}</p>
+          )}
+        </div>
+        <svg
+          className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Collapsible body */}
+      {open && (
+        <div className="border-t border-surface-100">
+          <div className="p-3 space-y-2">
+            {loading ? (
+              <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
+                <Spinner /> <span className="text-xs">Loading…</span>
+              </div>
+            ) : schemes.length === 0 ? (
+              <EmptyState
+                icon={<Icons.FileText />}
+                title="No schemes yet"
+                description="Upload a marking scheme or past paper PDF to get started."
+              />
+            ) : (
+              <>
+                {replacing && (
+                  <div className="flex items-center gap-2 text-xs text-slate-500 px-1 py-2">
+                    <Spinner className="w-3.5 h-3.5" /> Replacing scheme…
+                  </div>
+                )}
+                {schemes.map(scheme => (
+                  <SchemeCard
+                    key={scheme.schemeId}
+                    scheme={scheme}
+                    isActive={scheme.schemeId === activeSchemeId}
+                    isDeleting={deleting && deleteTarget === scheme.schemeId}
+                    isReplacing={replacing && deleteTarget === scheme.schemeId}
+                    deleteTarget={deleteTarget}
+                    onUse={() => onUse(scheme)}
+                    onReplace={() => onReplace(scheme.schemeId)}
+                    onDeleteClick={() => onDeleteClick(scheme.schemeId)}
+                    onDeleteConfirm={onDeleteConfirm}
+                    onDeleteCancel={onDeleteCancel}
+                  />
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── My Sets collapsible card ──────────────────────────────────────────────────
+
+function MySetsCard({
+  sets,
+  loading,
+  activeSetId,
+  onRename,
+}: {
+  sets:        QuestionSetSummary[];
+  loading:     boolean;
+  activeSetId: string | null;
+  onRename:    (id: string, newName: string) => Promise<void>;
+}) {
+  const [open, setOpen]           = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
+  const [saving, setSaving]       = useState(false);
+  const inputRef                  = useRef<HTMLInputElement>(null);
+
+  function startEdit(s: QuestionSetSummary) {
+    setEditingId(s.id);
+    setEditValue(s.fileName);
+    setTimeout(() => inputRef.current?.select(), 0);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditValue('');
+  }
+
+  async function commitEdit(id: string) {
+    const trimmed = editValue.trim();
+    if (!trimmed) { cancelEdit(); return; }
+    setSaving(true);
+    await onRename(id, trimmed);
+    setSaving(false);
+    setEditingId(null);
+  }
+
+  return (
+    <div className="rounded-card border border-surface-200 bg-white shadow-card overflow-hidden">
+      {/* Header — click to toggle */}
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-50 transition-colors"
+      >
+        <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-semibold text-slate-800 leading-tight">My Sets</p>
+          {!loading && sets.length > 0 && (
+            <p className="text-2xs text-slate-400 mt-0.5">{sets.length} set{sets.length !== 1 ? 's' : ''}</p>
+          )}
+        </div>
+        <svg
+          className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Collapsible body */}
+      {open && (
+        <div className="border-t border-surface-100">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
+              <Spinner /> <span className="text-xs">Loading…</span>
+            </div>
+          ) : sets.length === 0 ? (
+            <p className="text-xs text-slate-400 text-center py-6 px-4">
+              No sets yet. Generate your first question set.
+            </p>
+          ) : (
+            <div className="max-h-64 overflow-y-auto divide-y divide-surface-100">
+              {sets.map(s => (
+                <div
+                  key={s.id}
+                  className={`px-3 py-2.5 transition-colors group ${
+                    s.id === activeSetId ? 'bg-accent-50' : 'hover:bg-surface-50'
+                  }`}>
+                  {editingId === s.id ? (
+                    <input
+                      ref={inputRef}
+                      value={editValue}
+                      onChange={e => setEditValue(e.target.value)}
+                      onBlur={() => commitEdit(s.id)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') commitEdit(s.id);
+                        if (e.key === 'Escape') cancelEdit();
+                      }}
+                      disabled={saving}
+                      className="w-full text-xs font-medium text-slate-800 border border-accent-400 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-accent-300"
+                      autoFocus
+                    />
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <p className="flex-1 text-xs font-medium text-slate-800 truncate">{s.fileName}</p>
+                      <button
+                        type="button"
+                        onClick={() => startEdit(s)}
+                        className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 hover:text-slate-600"
+                        title="Rename"
+                      >
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                            d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <StatusBadge status={s.status} />
+                    <span className="text-2xs text-slate-400 shrink-0">
+                      {s.questionCount}Q · {new Date(s.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {sets.length === 20 && (
+            <p className="text-2xs text-slate-400 text-center py-2 border-t border-surface-100">
+              Showing 20 most recent sets
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-components
@@ -201,6 +501,140 @@ function ChapterRow({
         {chapter.weightPercent}%
       </span>
     </label>
+  );
+}
+
+// ── Chapter multi-select dropdown ────────────────────────────────────────────
+
+function ChapterDropdown({
+  chapters,
+  selectedIds,
+  disabled,
+  onToggle,
+  onSelectAll,
+  onClearAll,
+}: {
+  chapters:    ChapterInfo[];
+  selectedIds: Set<string>;
+  disabled:    boolean;
+  onToggle:    (id: string) => void;
+  onSelectAll: () => void;
+  onClearAll:  () => void;
+}) {
+  const [open,    setOpen]    = useState(false);
+  const [touched, setTouched] = useState(false);
+  const ref                   = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const selCount = selectedIds.size;
+  const selWeight = chapters.filter(c => selectedIds.has(c._id)).reduce((s, c) => s + c.weightPercent, 0);
+  const allZeroWeight = chapters.filter(c => selectedIds.has(c._id)).every(c => c.weightPercent === 0);
+
+  return (
+    <div ref={ref} className="relative">
+      {/* Trigger */}
+      <button
+        type="button"
+        onClick={() => { if (!disabled) { setOpen(v => !v); setTouched(true); } }}
+        disabled={disabled}
+        className={[
+          'w-full flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm transition-colors',
+          open
+            ? 'border-accent-400 ring-2 ring-accent-200 bg-white'
+            : 'border-surface-300 bg-white hover:border-surface-400',
+          disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
+        ].join(' ')}
+      >
+        <span className={selCount === 0 ? 'text-slate-400' : 'text-slate-800 font-medium'}>
+          {selCount === 0
+            ? 'Select chapters…'
+            : `${selCount} chapter${selCount !== 1 ? 's' : ''} selected${selCount > 0 && !allZeroWeight ? ` · ${selWeight}% weight` : ''}`}
+        </span>
+        <svg
+          className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Dropdown panel */}
+      {open && (
+        <div className="absolute z-20 mt-1.5 w-full rounded-xl border border-surface-200 bg-white shadow-card-md overflow-hidden">
+          {/* Header actions */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-surface-100 bg-surface-50">
+            <span className="text-2xs font-semibold text-slate-400 uppercase tracking-wider">
+              {chapters.length} chapter{chapters.length !== 1 ? 's' : ''}
+            </span>
+            <div className="flex items-center gap-3">
+              {selCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onClearAll}
+                  className="text-2xs text-slate-400 hover:text-slate-600 transition-colors"
+                >
+                  Clear all
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onSelectAll}
+                className="text-2xs text-accent-600 hover:text-accent-700 font-medium transition-colors"
+              >
+                Select all
+              </button>
+            </div>
+          </div>
+
+          {/* Chapter list */}
+          <div className="max-h-56 overflow-y-auto divide-y divide-surface-100">
+            {chapters.map(ch => {
+              const sel = selectedIds.has(ch._id);
+              return (
+                <label
+                  key={ch._id}
+                  className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-surface-50 transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={sel}
+                    onChange={() => onToggle(ch._id)}
+                    className="w-4 h-4 rounded accent-indigo-600 shrink-0"
+                  />
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm text-slate-800 truncate">
+                      {ch.chapterNumber}. {ch.chapterName}
+                    </span>
+                    {ch.subject && (
+                      <span className="block text-2xs text-slate-400">{ch.subject}</span>
+                    )}
+                  </span>
+                  {ch.weightPercent > 0 && (
+                    <span className={`shrink-0 text-2xs font-semibold px-2 py-0.5 rounded-full tabular-nums ${
+                      sel ? 'bg-accent-100 text-accent-700' : 'bg-surface-100 text-slate-500'
+                    }`}>
+                      {ch.weightPercent}%
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Validation hint — only after user has opened the dropdown */}
+      {touched && selCount === 0 && (
+        <p className="mt-1.5 text-xs text-amber-600">Select at least one chapter to continue.</p>
+      )}
+    </div>
   );
 }
 
@@ -446,6 +880,63 @@ export default function DashboardPage() {
   const [regenToast,       setRegenToast]       = useState<{ type: string; ok: boolean; msg: string } | null>(null);
   const [downloadingPaper, setDownloadingPaper] = useState(false);
 
+  // ── My Sets state ────────────────────────────────────────────────────────────
+  const [mySets,       setMySets]       = useState<QuestionSetSummary[]>([]);
+  const [setsLoading,  setSetsLoading]  = useState(true);
+  const [submitting,   setSubmitting]   = useState(false);
+  const [submitted,    setSubmitted]    = useState(false);
+
+  async function loadMySets() {
+    try {
+      const res  = await apiFetch('/api/sets');
+      if (!res.ok) return;
+      const data = await res.json() as { sets: QuestionSetSummary[] };
+      setMySets(data.sets ?? []);
+    } catch {
+      /* ignore */
+    } finally {
+      setSetsLoading(false);
+    }
+  }
+
+  useEffect(() => { loadMySets(); }, []);
+  useEffect(() => { setSubmitted(false); }, [setId]);
+
+  async function handleRename(id: string, newName: string) {
+    try {
+      const res = await apiFetch(`/api/sets/${id}/rename`, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ name: newName }),
+      });
+      if (res.ok) {
+        setMySets(prev => prev.map(s => s.id === id ? { ...s, fileName: newName } : s));
+      }
+    } catch {
+      /* ignore — input reverts on blur */
+    }
+  }
+
+  async function handleSubmitForReview() {
+    if (!setId) return;
+    setSubmitting(true);
+    try {
+      const res = await apiFetch(`/api/sets/${setId}/submit`, { method: 'POST' });
+      const body = await res.json() as { success?: boolean; error?: string };
+      if (!res.ok) {
+        showToast('submit', false, body.error ?? 'Submission failed.');
+      } else {
+        setSubmitted(true);
+        showToast('submit', true, 'Submitted for HOD review.');
+        await loadMySets();
+      }
+    } catch {
+      showToast('submit', false, 'Submission failed.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleDownloadPaper() {
     if (!setId) return;
     setDownloadingPaper(true);
@@ -501,6 +992,12 @@ export default function DashboardPage() {
   const [chaptersLoading,    setChaptersLoading]    = useState(true);
   const [totalWeight,        setTotalWeight]        = useState(0);
   const [selectedChapterIds, setSelectedChapterIds] = useState<Set<string>>(new Set());
+  const [subjectFilter,      setSubjectFilter]      = useState<string>('All');
+
+  const subjects = ['All', ...Array.from(new Set(chapters.map(c => c.subject).filter(Boolean)))];
+  const filteredChapters = subjectFilter === 'All'
+    ? chapters
+    : chapters.filter(c => c.subject === subjectFilter);
 
   const canGenerate =
     !isGenerating && schemeStep === 'done' &&
@@ -585,9 +1082,19 @@ export default function DashboardPage() {
 
   function toggleChapter(id: string) {
     setSelectedChapterIds(sel => {
-      const n = new Set(sel);
-      n.has(id) ? n.delete(id) : n.add(id);
-      return n;
+      if (sel.has(id)) {
+        const n = new Set(sel);
+        n.delete(id);
+        return n;
+      }
+      // Enforce single subject — if the new chapter's subject differs from
+      // already-selected chapters, clear the old selection first.
+      const incomingSubject = chapters.find(c => c._id === id)?.subject;
+      const existingSubject = chapters.find(c => sel.has(c._id))?.subject;
+      if (incomingSubject && existingSubject && incomingSubject !== existingSubject) {
+        return new Set([id]);
+      }
+      return new Set([...sel, id]);
     });
   }
 
@@ -876,17 +1383,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── Quick Stats bar ──────────────────────────────────────────────────── */}
-      <div className="bg-white border-b border-surface-100">
-        <div className="max-w-7xl mx-auto px-6">
-          <QuickStats
-            chaptersSelected={selectedChapterIds.size}
-            totalSelWeight={selectedWeight}
-            activeScheme={activeSchemeName}
-            bankCount={banks.length}
-          />
-        </div>
-      </div>
 
       {/* ── Main 2-column layout ─────────────────────────────────────────────── */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 items-start">
@@ -1015,72 +1511,75 @@ export default function DashboardPage() {
 
             {/* Step 1 — Select chapters */}
             <SectionStep step={1} title="Select chapters">
-              <Card>
-                {chaptersLoading ? (
-                  <div className="flex items-center justify-center gap-2.5 py-10 text-slate-400">
-                    <Spinner /> <span className="text-sm">Loading chapters…</span>
-                  </div>
-                ) : chapters.length === 0 ? (
+              {chaptersLoading ? (
+                <div className="flex items-center gap-2.5 text-slate-400 py-2">
+                  <Spinner /> <span className="text-sm">Loading chapters…</span>
+                </div>
+              ) : chapters.length === 0 ? (
+                <Card>
                   <EmptyState
                     icon={<Icons.BookOpen />}
                     title="No chapters yet"
                     description="Upload a textbook PDF from the sidebar to auto-detect chapters."
                   />
-                ) : (
-                  <>
-                    {/* Column header */}
-                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-100">
-                      <span className="text-2xs font-semibold text-slate-400 uppercase tracking-wider">
-                        {chapters.length} chapter{chapters.length !== 1 ? 's' : ''}
-                      </span>
-                      <div className="flex items-center gap-3">
-                        {selectedChapterIds.size > 0 && (
-                          <button
-                            onClick={() => setSelectedChapterIds(new Set())}
-                            className="text-2xs text-slate-400 hover:text-slate-600 transition-colors"
-                          >
-                            Clear all
-                          </button>
-                        )}
+                </Card>
+              ) : (
+                <div className="space-y-2">
+                  {/* Subject filter pills */}
+                  {subjects.length > 2 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {subjects.map(s => (
                         <button
-                          onClick={() => setSelectedChapterIds(new Set(chapters.map(c => c._id)))}
-                          className="text-2xs text-accent-600 hover:text-accent-700 font-medium transition-colors"
+                          key={s}
+                          type="button"
+                          onClick={() => setSubjectFilter(s)}
+                          className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                            subjectFilter === s
+                              ? 'bg-accent-600 text-white'
+                              : 'bg-surface-100 text-slate-600 hover:bg-surface-200'
+                          }`}
                         >
-                          Select all
+                          {s}
                         </button>
-                      </div>
-                    </div>
-                    <div className="divide-y divide-surface-100">
-                      {chapters.map(ch => (
-                        <ChapterRow
-                          key={ch._id}
-                          chapter={ch}
-                          selected={selectedChapterIds.has(ch._id)}
-                          disabled={isGenerating}
-                          onToggle={() => toggleChapter(ch._id)}
-                        />
                       ))}
                     </div>
-                    {/* Footer summary */}
-                    <div className="px-4 py-3 border-t border-surface-100 bg-surface-50 rounded-b-card">
-                      {selectedChapterIds.size === 0 ? (
-                        <InlineAlert variant="warning">Select at least one chapter to continue.</InlineAlert>
-                      ) : (() => {
-                        const sel = chapters.filter(c => selectedChapterIds.has(c._id));
-                        const selW = sel.reduce((s, c) => s + c.weightPercent, 0);
-                        const allZero = sel.every(c => c.weightPercent === 0);
-                        return (
-                          <p className="text-xs text-accent-700 font-medium">
-                            <span className="font-bold">{selectedChapterIds.size}</span> chapter{selectedChapterIds.size > 1 ? 's' : ''} selected
-                            {allZero ? ' — split equally' : ` · ${selW}% combined weight`}
-                          </p>
-                        );
-                      })()}
-                    </div>
-                  </>
-                )}
-              </Card>
+                  )}
+                  <ChapterDropdown
+                    chapters={filteredChapters}
+                    selectedIds={selectedChapterIds}
+                    disabled={isGenerating}
+                    onToggle={toggleChapter}
+                    onSelectAll={() => setSelectedChapterIds(new Set(filteredChapters.map(c => c._id)))}
+                    onClearAll={() => {
+                      const filteredIds = new Set(filteredChapters.map(c => c._id));
+                      setSelectedChapterIds(prev => new Set([...prev].filter(id => !filteredIds.has(id))));
+                    }}
+                  />
+                </div>
+              )}
             </SectionStep>
+
+            {/* "What comes next" hint — shown only before any chapters are selected */}
+            {!chaptersLoading && chapters.length > 0 && selectedChapterIds.size === 0 && (
+              <div className="rounded-xl border border-dashed border-surface-300 bg-surface-50 px-5 py-6">
+                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">What happens next</p>
+                <ol className="space-y-2.5">
+                  {[
+                    { step: '2', text: 'Pick a question paper scheme (or skip to configure manually)' },
+                    { step: '3', text: 'Choose question types, counts, and marks per question' },
+                    { step: '4', text: 'Generate — the AI creates questions from your selected chapters' },
+                    { step: '5', text: 'Review, edit, and submit to your HOD for approval' },
+                  ].map(s => (
+                    <li key={s.step} className="flex items-start gap-3">
+                      <span className="shrink-0 w-5 h-5 rounded-full bg-surface-200 text-slate-500 text-2xs font-bold flex items-center justify-center mt-0.5">
+                        {s.step}
+                      </span>
+                      <span className="text-sm text-slate-500">{s.text}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
 
             {/* Step 2 — Scheme picker */}
             {schemeStep === 'pending' && selectedChapterIds.size > 0 && (
@@ -1293,6 +1792,30 @@ export default function DashboardPage() {
                     />
                   ))}
                 </div>
+
+                {/* Submit for HOD review */}
+                <div className="mt-4 flex items-center gap-3">
+                  {submitted ? (
+                    <div className="flex items-center gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm text-emerald-700 font-medium w-full">
+                      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Submitted for HOD review
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleSubmitForReview}
+                      disabled={submitting || isGenerating}
+                      className={`flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-colors ${
+                        submitting || isGenerating
+                          ? 'bg-surface-200 text-slate-400 cursor-not-allowed'
+                          : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      }`}
+                    >
+                      {submitting ? <><Spinner className="w-4 h-4" /> Submitting…</> : 'Submit for HOD Review'}
+                    </button>
+                  )}
+                </div>
               </SectionStep>
             )}
           </>}
@@ -1303,78 +1826,42 @@ export default function DashboardPage() {
         ═══════════════════════════════════════════════════════════════════ */}
         <aside className="space-y-4 lg:sticky lg:top-[7.5rem]">
 
+          {/* ── My Sets ───────────────────────────────────────────────────── */}
+          <MySetsCard
+            sets={mySets}
+            loading={setsLoading}
+            activeSetId={setId}
+            onRename={handleRename}
+          />
+
           {/* ── My Schemes ────────────────────────────────────────────────── */}
-          <Card>
-            <CardHeader
-              title="My Schemes"
-              subtitle="Exam blueprints"
-              icon={<Icons.Layers />}
-            />
-
-            {/* Hidden replace input */}
-            <input
-              ref={replaceInputRef}
-              type="file"
-              accept=".pdf,.docx"
-              className="hidden"
-              onChange={handleReplaceFile}
-            />
-
-            <div className="p-3 space-y-2">
-              {schemesLoading ? (
-                <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
-                  <Spinner /> <span className="text-xs">Loading…</span>
-                </div>
-              ) : schemes.length === 0 ? (
-                <EmptyState
-                  icon={<Icons.FileText />}
-                  title="No schemes yet"
-                  description="Upload a marking scheme or past paper PDF to get started."
-                />
-              ) : (
-                <>
-                  {replacing && (
-                    <div className="flex items-center gap-2 text-xs text-slate-500 px-1 py-2">
-                      <Spinner className="w-3.5 h-3.5" /> Replacing scheme…
-                    </div>
-                  )}
-                  {schemes.map(scheme => (
-                    <SchemeCard
-                      key={scheme.schemeId}
-                      scheme={scheme}
-                      isActive={scheme.schemeId === activeSchemeId}
-                      isDeleting={deleting && deleteTarget === scheme.schemeId}
-                      isReplacing={replacing && replaceTarget === scheme.schemeId}
-                      deleteTarget={deleteTarget}
-                      onUse={() => handleUseScheme(scheme)}
-                      onReplace={() => { setReplaceTarget(scheme.schemeId); replaceInputRef.current?.click(); }}
-                      onDeleteClick={() => setDeleteTarget(scheme.schemeId)}
-                      onDeleteConfirm={handleDeleteScheme}
-                      onDeleteCancel={() => setDeleteTarget(null)}
-                    />
-                  ))}
-                </>
-              )}
-            </div>
-          </Card>
+          <SchemesCard
+            schemes={schemes}
+            loading={schemesLoading}
+            activeSchemeId={activeSchemeId}
+            replacing={replacing}
+            deleting={deleting}
+            deleteTarget={deleteTarget}
+            replaceInputRef={replaceInputRef}
+            onReplaceFile={handleReplaceFile}
+            onUse={handleUseScheme}
+            onReplace={(schemeId) => { setReplaceTarget(schemeId); replaceInputRef.current?.click(); }}
+            onDeleteClick={setDeleteTarget}
+            onDeleteConfirm={handleDeleteScheme}
+            onDeleteCancel={() => setDeleteTarget(null)}
+          />
 
           {/* ── My Chapters ───────────────────────────────────────────────── */}
-          <Card>
-            <CardHeader
-              title="My Chapters"
-              subtitle={
-                !chaptersLoading && chapters.length > 0
-                  ? `${chapters.length} chapters`
-                  : undefined
-              }
-              icon={<Icons.BookOpen />}
-              action={
-                !chaptersLoading && chapters.length > 0 ? (
-                  <WeightBar value={totalWeight} />
-                ) : undefined
-              }
-            />
-
+          <CollapsibleCard
+            title="My Chapters"
+            subtitle={!chaptersLoading && chapters.length > 0 ? `${chapters.length} chapter${chapters.length !== 1 ? 's' : ''}` : undefined}
+            icon={
+              <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+                  d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+            }
+          >
             <div className="p-3 space-y-2">
               {/* Action buttons */}
               <div className="flex gap-2">
@@ -1528,7 +2015,7 @@ export default function DashboardPage() {
                 </p>
               ) : (
                 <>
-                  <div className="space-y-0.5">
+                  <div className="max-h-48 overflow-y-auto space-y-0.5">
                     {chapters.map(ch => (
                       <SidebarChapterRow
                         key={ch._id}
@@ -1547,28 +2034,30 @@ export default function DashboardPage() {
                 </>
               )}
             </div>
-          </Card>
+          </CollapsibleCard>
 
           {/* ── My Reference Banks ────────────────────────────────────────── */}
-          <Card>
-            <CardHeader
-              title="Reference Banks"
-              subtitle="Past papers for style guidance"
-              icon={<Icons.Archive />}
-              action={
-                <button
-                  onClick={() => { setShowBankForm(v => !v); setBankUploadError(null); }}
-                  className={`text-2xs font-semibold flex items-center gap-1 transition-colors ${
-                    showBankForm
-                      ? 'text-slate-400 hover:text-slate-600'
-                      : 'text-accent-600 hover:text-accent-700'
-                  }`}
-                >
-                  {showBankForm ? '× Cancel' : <><Icons.Plus /> Add paper</>}
-                </button>
-              }
-            />
+          <CollapsibleCard
+            title="Reference Banks"
+            subtitle={!banksLoading && banks.length > 0 ? `${banks.length} paper${banks.length !== 1 ? 's' : ''}` : 'Past papers for style guidance'}
+            icon={
+              <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75}
+                  d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+              </svg>
+            }
+          >
             <div className="p-3 space-y-2">
+              <button
+                onClick={() => { setShowBankForm(v => !v); setBankUploadError(null); }}
+                className={`w-full rounded-card-inner py-2 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                  showBankForm
+                    ? 'bg-surface-100 text-slate-600 border border-surface-200'
+                    : 'bg-accent-600 text-white hover:bg-accent-700'
+                }`}
+              >
+                {showBankForm ? '× Cancel' : <><Icons.Upload /> Add past paper</>}
+              </button>
               {showBankForm && (
                 <UploadForm
                   title="Upload past paper"
@@ -1654,7 +2143,7 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
-          </Card>
+          </CollapsibleCard>
 
         </aside>
       </div>

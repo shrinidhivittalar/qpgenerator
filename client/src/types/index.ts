@@ -141,6 +141,24 @@ export interface TypeResult {
   error?:       string;
 }
 
+export type SetStatus =
+  | 'draft'
+  | 'generating'
+  | 'review_pending'
+  | 'revision_requested'
+  | 'approved'
+  | 'archived';
+
+export interface QuestionSetSummary {
+  id:            string;
+  fileName:      string;
+  status:        SetStatus;
+  createdAt:     string;
+  submittedAt:   string | null;
+  questionCount: number;
+  typeCount:     number;
+}
+
 export interface ChapterInfo {
   _id:               string;
   chapterName:       string;

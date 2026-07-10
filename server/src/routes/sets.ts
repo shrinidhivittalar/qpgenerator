@@ -49,6 +49,88 @@ const RegenerateBodySchema = z.object({
   type: z.string(),
 });
 
+// ── GET /api/sets ─────────────────────────────────────────────────────────────
+
+router.get('/', requireRole('teacher'), async (req: Request, res: Response) => {
+  const userId = (req as any).userId as string;
+  try {
+    const sets = await QuestionSet.find({ teacherId: userId })
+      .select('fileName status createdAt questionBlocks submittedAt')
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    res.json({
+      sets: sets.map(s => ({
+        id:            (s._id as any).toString(),
+        fileName:      s.fileName,
+        status:        s.status,
+        createdAt:     s.createdAt,
+        submittedAt:   (s as any).submittedAt ?? null,
+        questionCount: (s.questionBlocks ?? []).reduce((acc: number, b: any) => acc + (b.questions?.length ?? 0), 0),
+        typeCount:     (s.questionBlocks ?? []).filter((b: any) => b.status === 'success').length,
+      })),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('sets_list_failed', { userId, error: msg });
+    res.status(500).json({ error: 'Failed to load sets.' });
+  }
+});
+
+// ── POST /api/sets/:id/submit ─────────────────────────────────────────────────
+
+router.post('/:id/submit', requireRole('teacher'), async (req: Request, res: Response) => {
+  const userId = (req as any).userId as string;
+  try {
+    const set = await QuestionSet.findOne({ _id: req.params.id, teacherId: userId });
+    if (!set) { res.status(404).json({ error: 'Set not found.' }); return; }
+
+    const hasQuestions = (set.questionBlocks ?? []).some((b: any) => b.questions?.length > 0);
+    if (!hasQuestions) {
+      res.status(400).json({ error: 'Generate at least one question type before submitting.' });
+      return;
+    }
+
+    if (!['draft', 'revision_requested'].includes(set.status)) {
+      res.status(400).json({ error: 'This set cannot be submitted in its current state.' });
+      return;
+    }
+
+    set.status = 'review_pending';
+    (set as any).submittedAt = new Date();
+    await set.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('sets_submit_failed', { userId, setId: req.params.id, error: msg });
+    res.status(500).json({ error: 'Failed to submit set.' });
+  }
+});
+
+// ── PATCH /api/sets/:id/rename ────────────────────────────────────────────────
+
+router.patch('/:id/rename', requireRole('teacher'), async (req: Request, res: Response) => {
+  const userId = (req as any).userId as string;
+  const { name } = req.body as { name?: string };
+  if (!name || !name.trim()) {
+    res.status(400).json({ error: 'Name cannot be empty.' });
+    return;
+  }
+  try {
+    const set = await QuestionSet.findOne({ _id: req.params.id, teacherId: userId });
+    if (!set) { res.status(404).json({ error: 'Set not found.' }); return; }
+    set.fileName = name.trim();
+    await set.save();
+    res.json({ success: true, fileName: set.fileName });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('sets_rename_failed', { userId, setId: req.params.id, error: msg });
+    res.status(500).json({ error: 'Failed to rename set.' });
+  }
+});
+
 // ── POST /api/sets/create ─────────────────────────────────────────────────────
 // Creates an empty QuestionSet for chapter-based mode where no source PDF is
 // needed — chapters supply the source text at generation time.
