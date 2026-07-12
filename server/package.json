@@ -7,10 +7,12 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:figures": "tsx src/test/testFigureDetection.ts"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
+    "canvas": "^3.2.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "docx": "^9.7.1",
