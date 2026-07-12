@@ -12,4 +12,21 @@ export const FigureBasedSchema = z.object({
   correctAnswer: z.string().min(1),
   useLatex:      z.boolean().default(false),
   explanation:   z.string().min(1),
+}).superRefine((val, ctx) => {
+  if (val.subType === 'mcq') {
+    if (!val.options || val.options.length !== 4) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['options'],
+        message: 'MCQ questions must have exactly 4 options.',
+      });
+    }
+    if (val.options && !val.options.includes(val.correctAnswer)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['correctAnswer'],
+        message: 'correctAnswer must match one of the options exactly.',
+      });
+    }
+  }
 });

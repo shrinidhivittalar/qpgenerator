@@ -355,7 +355,7 @@ function looksLikeQRCode(
 // ── Public API ────────────────────────────────────────────────────────────────
 export async function renderFigurePages(
   pdfBuffer: Buffer,
-  maxPages   = 40,
+  maxPages   = 200,
 ): Promise<RenderedPage[]> {
   const factory = new NodeCanvasFactory();
   const data    = new Uint8Array(pdfBuffer);

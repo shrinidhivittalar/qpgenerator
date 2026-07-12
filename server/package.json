@@ -8,7 +8,8 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:figures": "tsx src/test/testFigureDetection.ts"
+    "test:figures": "tsx src/test/testFigureDetection.ts",
+    "test:export": "tsx src/test/testExport.ts"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

@@ -480,7 +480,13 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
 
       // Embed the figure image
       if (imageBase64) {
-        const imgType  = imageMimeType === 'image/png' ? 'png' : 'jpg';
+        const imgTypeMap: Record<string, 'png' | 'jpg' | 'gif' | 'bmp'> = {
+          'image/png':  'png',
+          'image/jpeg': 'jpg',
+          'image/gif':  'gif',
+          'image/bmp':  'bmp',
+        };
+        const imgType = imgTypeMap[imageMimeType] ?? 'png';
         const imgBuf   = Buffer.from(imageBase64, 'base64');
         const imgDims  = readImageDimensions(imgBuf);
         out.push(new Paragraph({

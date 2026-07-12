@@ -1,297 +1,123 @@
 /**
- * Converts text containing inline LaTeX ($...$) to an array of TextRun | Math
- * nodes for use in docx paragraphs.
+ * Converts text containing inline LaTeX ($...$) to an array of TextRun nodes.
  *
- * Handles the LaTeX subset common in Class X math exam papers:
- *   - Superscripts / subscripts: x^2, a_{n+1}, x^{n+1}
- *   - Fractions: \frac{a}{b}
- *   - Radicals: \sqrt{x}, \sqrt[3]{x}
- *   - Named functions: \sin, \cos, \tan, \log, \ln …
- *   - Greek letters: \theta, \pi, \alpha …
- *   - Common symbols: \times, \pm, \leq, \angle …
- *   - Brackets: \left( \right), ( ), [ ]
+ * Math spans are rendered as italicised plain text with Unicode substitutions
+ * (x², √(x), α, ≤, …) rather than OMML. This is intentional: mixing DocxMath
+ * nodes with TextRun nodes in a Paragraph requires the docx file to declare the
+ * OOXML math namespace relationship, which the docx library does not reliably
+ * emit in inline context — causing Word to report the file as corrupted.
+ * Unicode-substituted italic text is readable, never corrupts, and matches the
+ * style used in most printed Indian board exam papers anyway.
  */
 
-import {
-  Math as DocxMath,
-  MathFraction,
-  MathFunction,
-  MathRadical,
-  MathRoundBrackets,
-  MathRun,
-  MathSquareBrackets,
-  MathSubScript,
-  MathSubSuperScript,
-  MathSuperScript,
-  TextRun,
-  type IRunOptions,
-} from 'docx';
+import { TextRun, type IRunOptions } from 'docx';
 
 // ── Symbol tables ─────────────────────────────────────────────────────────────
 
-const GREEK: Record<string, string> = {
-  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε',
-  varepsilon: 'ε', zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'θ',
-  iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ',
-  pi: 'π', varpi: 'π', rho: 'ρ', varrho: 'ρ', sigma: 'σ', varsigma: 'ς',
-  tau: 'τ', upsilon: 'υ', phi: 'φ', varphi: 'φ', chi: 'χ', psi: 'ψ',
-  omega: 'ω',
-  Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ',
-  Pi: 'Π', Sigma: 'Σ', Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+const SUPERSCRIPTS: Record<string, string> = {
+  '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴',
+  '5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹',
+  'n':'ⁿ','i':'ⁱ','a':'ᵃ','b':'ᵇ','c':'ᶜ',
+  '+':'⁺','-':'⁻','=':'⁼','(':'⁽',')':'⁾',
 };
 
-const SYMBOLS: Record<string, string> = {
-  times: '×', div: '÷', pm: '±', mp: '∓', cdot: '·', star: '★',
-  leq: '≤', geq: '≥', le: '≤', ge: '≥', neq: '≠', ne: '≠',
-  approx: '≈', sim: '∼', cong: '≅', equiv: '≡', propto: '∝',
-  angle: '∠', measuredangle: '∡', triangle: '△', square: '□',
-  infty: '∞', ldots: '…', cdots: '⋯', vdots: '⋮', ddots: '⋱',
-  because: '∵', therefore: '∴', implies: '⟹',
-  rightarrow: '→', leftarrow: '←', Rightarrow: '⇒', Leftarrow: '⇐',
-  leftrightarrow: '↔', Leftrightarrow: '⟺',
-  uparrow: '↑', downarrow: '↓',
-  parallel: '∥', perp: '⊥', circ: '°',
-  in: '∈', notin: '∉', subset: '⊂', subseteq: '⊆',
-  supset: '⊃', supseteq: '⊇', cup: '∪', cap: '∩',
-  forall: '∀', exists: '∃', nexists: '∄',
-  neg: '¬', land: '∧', lor: '∨',
-  nabla: '∇', partial: '∂', hbar: 'ℏ',
-  mathbb: '',  // handled separately
+const SUBSCRIPTS: Record<string, string> = {
+  '0':'₀','1':'₁','2':'₂','3':'₃','4':'₄',
+  '5':'₅','6':'₆','7':'₇','8':'₈','9':'₉',
+  'n':'ₙ','i':'ᵢ','a':'ₐ','e':'ₑ','o':'ₒ',
+  '+':'₊','-':'₋','=':'₌','(':'₍',')':'₎',
 };
 
-const TRIG = new Set([
-  'sin', 'cos', 'tan', 'sec', 'csc', 'cot',
-  'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh',
-  'log', 'ln', 'exp', 'lim', 'max', 'min', 'sup', 'inf',
-  'det', 'gcd', 'lcm', 'mod', 'arg',
-]);
+const COMMANDS: Record<string, string> = {
+  // Greek
+  alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ε', varepsilon:'ε',
+  zeta:'ζ', eta:'η', theta:'θ', vartheta:'θ', iota:'ι', kappa:'κ',
+  lambda:'λ', mu:'μ', nu:'ν', xi:'ξ', pi:'π', rho:'ρ', sigma:'σ',
+  tau:'τ', upsilon:'υ', phi:'φ', varphi:'φ', chi:'χ', psi:'ψ', omega:'ω',
+  Gamma:'Γ', Delta:'Δ', Theta:'Θ', Lambda:'Λ', Xi:'Ξ',
+  Pi:'Π', Sigma:'Σ', Upsilon:'Υ', Phi:'Φ', Psi:'Ψ', Omega:'Ω',
+  // Operators / symbols
+  times:'×', div:'÷', pm:'±', mp:'∓', cdot:'·',
+  leq:'≤', geq:'≥', le:'≤', ge:'≥', neq:'≠', ne:'≠',
+  approx:'≈', sim:'~', cong:'≅', equiv:'≡', propto:'∝',
+  angle:'∠', triangle:'△', infty:'∞', ldots:'…', cdots:'⋯',
+  because:'∵', therefore:'∴',
+  rightarrow:'→', leftarrow:'←', Rightarrow:'⇒', Leftarrow:'⇐',
+  leftrightarrow:'↔', Leftrightarrow:'⟺', implies:'⟹',
+  uparrow:'↑', downarrow:'↓',
+  parallel:'∥', perp:'⊥', circ:'°',
+  in:'∈', notin:'∉', subset:'⊂', subseteq:'⊆',
+  cup:'∪', cap:'∩', forall:'∀', exists:'∃',
+  nabla:'∇', partial:'∂',
+  // Trig / functions — render as plain text
+  sin:'sin', cos:'cos', tan:'tan', sec:'sec', csc:'csc', cot:'cot',
+  arcsin:'arcsin', arccos:'arccos', arctan:'arctan',
+  sinh:'sinh', cosh:'cosh', tanh:'tanh',
+  log:'log', ln:'ln', exp:'exp', lim:'lim',
+  max:'max', min:'min', sup:'sup', inf:'inf',
+  det:'det', gcd:'gcd', lcm:'lcm', mod:'mod', arg:'arg',
+  // Misc
+  sqrt:'√',
+};
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── LaTeX → plain Unicode text ────────────────────────────────────────────────
 
-type MC =
-  | InstanceType<typeof MathRun>
-  | InstanceType<typeof MathFraction>
-  | InstanceType<typeof MathRadical>
-  | InstanceType<typeof MathSuperScript>
-  | InstanceType<typeof MathSubScript>
-  | InstanceType<typeof MathSubSuperScript>
-  | InstanceType<typeof MathFunction>
-  | InstanceType<typeof MathRoundBrackets>
-  | InstanceType<typeof MathSquareBrackets>;
+function latexToPlainText(latex: string): string {
+  let s = latex.trim();
 
-// ── Parser ────────────────────────────────────────────────────────────────────
+  // \frac{num}{den} → (num)/(den)
+  s = s.replace(/\\frac\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g,
+    (_, num, den) => `(${latexToPlainText(num)})/(${latexToPlainText(den)})`);
 
-class LatexParser {
-  private pos = 0;
+  // \sqrt[n]{x} → ⁿ√(x)
+  s = s.replace(/\\sqrt\[([^\]]+)\]\{([^{}]*)\}/g,
+    (_, n, x) => `${latexToPlainText(n)}√(${latexToPlainText(x)})`);
 
-  constructor(private readonly src: string) {}
+  // \sqrt{x} → √(x)
+  s = s.replace(/\\sqrt\{([^{}]*)\}/g,
+    (_, x) => `√(${latexToPlainText(x)})`);
 
-  parse(): MC[] {
-    return this.parseSeq();
-  }
+  // \sqrt x (no braces, single char) → √x
+  s = s.replace(/\\sqrt\s+(\S)/g, (_, c) => `√${c}`);
 
-  private ch(): string { return this.src[this.pos] ?? ''; }
-  private eat(): string { return this.src[this.pos++] ?? ''; }
+  // \left( … \right)  /  \left[ … \right]
+  s = s.replace(/\\left\s*\(/g, '(').replace(/\\right\s*\)/g, ')');
+  s = s.replace(/\\left\s*\[/g, '[').replace(/\\right\s*\]/g, ']');
+  s = s.replace(/\\left\s*\|/g, '|').replace(/\\right\s*\|/g, '|');
 
-  private skip(): void {
-    while (this.pos < this.src.length && /[ \t]/.test(this.src[this.pos])) this.pos++;
-  }
+  // \text{…} / \mathrm{…} etc — strip wrapper
+  s = s.replace(/\\(?:text|mathrm|mathit|mathbf|mathsf|operatorname)\{([^{}]*)\}/g, '$1');
 
-  // Parse a sequence of math nodes until end or stop char.
-  private parseSeq(stop?: string): MC[] {
-    const out: MC[] = [];
-    while (this.pos < this.src.length) {
-      this.skip();
-      if (!this.ch() || (stop && this.ch() === stop)) break;
+  // Named commands
+  s = s.replace(/\\([a-zA-Z]+)/g, (match, name) => COMMANDS[name] ?? match);
 
-      // Inline group {…} — parse contents and check for trailing ^ / _
-      if (this.ch() === '{') {
-        this.eat();
-        const inner = this.parseSeq('}');
-        if (this.ch() === '}') this.eat();
-        out.push(...this.withScripts(inner));
-        continue;
-      }
+  // Superscripts: ^{expr} or ^c
+  s = s.replace(/\^\{([^{}]+)\}/g, (_, inner) => {
+    return [...latexToPlainText(inner)].map(c => SUPERSCRIPTS[c] ?? c).join('');
+  });
+  s = s.replace(/\^([A-Za-z0-9])/g, (_, c) => SUPERSCRIPTS[c] ?? `^${c}`);
 
-      const atom = this.parseAtom();
-      if (atom === null) break;
-      out.push(...this.withScripts([atom]));
-    }
-    return out;
-  }
+  // Subscripts: _{expr} or _c
+  s = s.replace(/_\{([^{}]+)\}/g, (_, inner) => {
+    return [...latexToPlainText(inner)].map(c => SUBSCRIPTS[c] ?? c).join('');
+  });
+  s = s.replace(/_([A-Za-z0-9])/g, (_, c) => SUBSCRIPTS[c] ?? `_${c}`);
 
-  // Wrap a base with any trailing ^ / _ scripts.
-  private withScripts(base: MC[]): MC[] {
-    this.skip();
-    let sup: MC[] | undefined;
-    let sub: MC[] | undefined;
+  // Strip remaining braces used for grouping
+  s = s.replace(/[{}]/g, '');
 
-    if (this.ch() === '^') { this.eat(); sup = this.parseArg(); this.skip(); }
-    if (this.ch() === '_') { this.eat(); sub = this.parseArg(); this.skip(); }
-    // Reverse order: _ before ^
-    if (!sup && this.ch() === '^') { this.eat(); sup = this.parseArg(); }
+  // Collapse multiple spaces
+  s = s.replace(/\s{2,}/g, ' ').trim();
 
-    if (sup && sub) return [new MathSubSuperScript({ children: base, superScript: sup, subScript: sub })];
-    if (sup)        return [new MathSuperScript({ children: base, superScript: sup })];
-    if (sub)        return [new MathSubScript({ children: base, subScript: sub })];
-    return base;
-  }
-
-  // Parse a single non-group atom.
-  private parseAtom(): MC | null {
-    const c = this.ch();
-    if (!c || c === '}') return null;
-
-    if (c === '\\') return this.parseCommand();
-
-    if (c === '(') {
-      this.eat();
-      const inner = this.parseSeq(')');
-      if (this.ch() === ')') this.eat();
-      return new MathRoundBrackets({ children: inner });
-    }
-
-    if (c === '[') {
-      this.eat();
-      const inner = this.parseSeq(']');
-      if (this.ch() === ']') this.eat();
-      return new MathSquareBrackets({ children: inner });
-    }
-
-    // Skip alignment char
-    if (c === '&') { this.eat(); return new MathRun(' '); }
-
-    this.eat();
-    return new MathRun(c);
-  }
-
-  // Parse an argument: {group} or a single atom.
-  private parseArg(): MC[] {
-    this.skip();
-    if (this.ch() === '{') {
-      this.eat();
-      const inner = this.parseSeq('}');
-      if (this.ch() === '}') this.eat();
-      return inner;
-    }
-    const atom = this.parseAtom();
-    return atom ? [atom] : [new MathRun('')];
-  }
-
-  // Parse optional [n] argument (for \sqrt[n]{…}).
-  private parseOptional(): MC[] | undefined {
-    this.skip();
-    if (this.ch() !== '[') return undefined;
-    this.eat();
-    const inner = this.parseSeq(']');
-    if (this.ch() === ']') this.eat();
-    return inner.length > 0 ? inner : undefined;
-  }
-
-  private parseCommand(): MC | null {
-    this.eat(); // consume '\'
-
-    // Read alphabetic command name
-    let name = '';
-    while (this.pos < this.src.length && /[a-zA-Z]/.test(this.src[this.pos])) {
-      name += this.eat();
-    }
-
-    // Skip single trailing space after command (LaTeX convention)
-    if (this.src[this.pos] === ' ') this.eat();
-
-    if (!name) {
-      // Special escaped char
-      const c = this.eat();
-      const map: Record<string, string> = { '{': '{', '}': '}', '\\': '\n', ',': ' ', ';': ' ', '!': '', '|': '|' };
-      return new MathRun(map[c] ?? c);
-    }
-
-    if (GREEK[name])   return new MathRun(GREEK[name]);
-    if (SYMBOLS[name]) return new MathRun(SYMBOLS[name]);
-
-    if (name === 'frac') {
-      const numerator   = this.parseArg();
-      const denominator = this.parseArg();
-      return new MathFraction({ numerator, denominator });
-    }
-
-    if (name === 'sqrt') {
-      const degree   = this.parseOptional();
-      const children = this.parseArg();
-      return new MathRadical({ children, degree });
-    }
-
-    if (TRIG.has(name)) {
-      return new MathFunction({
-        name:     [new MathRun(name)],
-        children: [],
-      });
-    }
-
-    if (name === 'text' || name === 'mathrm' || name === 'mathit' || name === 'mathbf' || name === 'mathsf') {
-      const arg = this.parseArg();
-      return arg.length === 1 ? arg[0] : (arg[0] ?? new MathRun(''));
-    }
-
-    if (name === 'left') {
-      const bracket = this.eat(); // ( [ | etc.
-      const inner   = this.parseUntilRight();
-      return bracket === '[' ? new MathSquareBrackets({ children: inner })
-                             : new MathRoundBrackets({ children: inner });
-    }
-
-    if (name === 'right') {
-      this.eat(); // consume closing bracket char — handled by parseUntilRight
-      return null;
-    }
-
-    // Unknown — render as literal text
-    return new MathRun('\\' + name);
-  }
-
-  private parseUntilRight(): MC[] {
-    const out: MC[] = [];
-    while (this.pos < this.src.length) {
-      if (this.src.startsWith('\\right', this.pos)) break;
-      this.skip();
-      if (!this.ch()) break;
-      if (this.ch() === '{') {
-        this.eat();
-        const inner = this.parseSeq('}');
-        if (this.ch() === '}') this.eat();
-        out.push(...this.withScripts(inner));
-      } else {
-        const atom = this.parseAtom();
-        if (atom) out.push(...this.withScripts([atom]));
-      }
-    }
-    return out;
-  }
+  return s;
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Dollar-sign splitter ──────────────────────────────────────────────────────
+// Splits text on $…$ delimiters. A `$` only opens a math region when the inner
+// content looks like LaTeX (has \, ^, _, {, } or is short with no English words).
+// Currency amounts like `$8000` or `$500` are never treated as math.
 
-/**
- * Convert a LaTeX string (no delimiters) to an array of Math components.
- */
-function latexToComponents(latex: string): MC[] {
-  return new LatexParser(latex.trim()).parse();
-}
-
-/**
- * Split text on $…$ delimiters and return an array of TextRun | Math nodes.
- * Preserves non-math text as styled TextRun instances.
- */
-// Scan text for $…$ math regions. A `$` only opens a math region when the
-// content up to the NEXT `$` looks like LaTeX (has \, ^, _, {, } or is short
-// with no English words). Currency amounts like `$8000` never open a region.
-//
-// This must NOT use a greedy regex like /\$([^$]+)\$/ because that would swallow
-// `$8000. If she gets an annual increment of $500` as one big match.
-function splitOnMathDollar(
-  text: string,
-): Array<{ kind: 'text' | 'math'; content: string }> {
+function splitOnMathDollar(text: string): Array<{ kind: 'text' | 'math'; content: string }> {
   const segments: Array<{ kind: 'text' | 'math'; content: string }> = [];
   let i = 0;
   let textStart = 0;
@@ -299,26 +125,20 @@ function splitOnMathDollar(
   while (i < text.length) {
     if (text[i] !== '$') { i++; continue; }
 
-    // Found a `$`. Look for the closing `$`.
     const openPos = i;
     let j = openPos + 1;
     while (j < text.length && text[j] !== '$') j++;
 
-    if (j >= text.length) {
-      // No closing $ — treat the rest as plain text and stop.
-      break;
-    }
+    if (j >= text.length) break; // no closing $ — treat rest as plain text
 
     const inner = text.slice(openPos + 1, j);
 
-    // Decide if `inner` is LaTeX or currency/plain text.
     const hasLatexSyntax = /[\\^_{}]/.test(inner);
     const isPureNumber   = /^\d[\d,.]*$/.test(inner.trim());
     const isShortExpr    = inner.length <= 25 && !/\s[a-zA-Z]{3,}/.test(inner);
     const isLatex        = hasLatexSyntax || (!isPureNumber && isShortExpr);
 
     if (isLatex) {
-      // Flush pending plain text
       if (openPos > textStart) {
         segments.push({ kind: 'text', content: text.slice(textStart, openPos) });
       }
@@ -326,13 +146,10 @@ function splitOnMathDollar(
       i = j + 1;
       textStart = i;
     } else {
-      // Not LaTeX — skip this `$` and continue scanning from the next character.
-      // Do NOT consume the closing `$`; it might open a future math region.
       i = openPos + 1;
     }
   }
 
-  // Remaining plain text
   if (textStart < text.length) {
     segments.push({ kind: 'text', content: text.slice(textStart) });
   }
@@ -340,22 +157,25 @@ function splitOnMathDollar(
   return segments;
 }
 
+// ── Public API ────────────────────────────────────────────────────────────────
+
 export function renderTextWithMath(
   text: string,
   runOptions: IRunOptions = {},
-): (InstanceType<typeof TextRun> | InstanceType<typeof DocxMath>)[] {
+): InstanceType<typeof TextRun>[] {
+  if (!text) return [];
   if (!text.includes('$')) {
     return [new TextRun({ text, ...runOptions })];
   }
 
-  const result: (InstanceType<typeof TextRun> | InstanceType<typeof DocxMath>)[] = [];
+  const result: InstanceType<typeof TextRun>[] = [];
 
   for (const seg of splitOnMathDollar(text)) {
     if (seg.kind === 'text') {
       if (seg.content) result.push(new TextRun({ text: seg.content, ...runOptions }));
     } else {
-      const children = latexToComponents(seg.content);
-      if (children.length > 0) result.push(new DocxMath({ children }));
+      const plain = latexToPlainText(seg.content);
+      if (plain) result.push(new TextRun({ text: plain, ...runOptions, italics: true }));
     }
   }
 

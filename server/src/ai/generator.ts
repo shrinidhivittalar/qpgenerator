@@ -242,16 +242,17 @@ export async function generateTypeViaSlots(
       logger.warn('figureBased_no_pages', { count });
       return { questions: [], requested: count, received: 0 };
     }
-    const questions: object[] = [];
-    for (let i = 0; i < count; i++) {
-      const figure = figurePages[i % figurePages.length];
-      try {
-        const q = await limiter(() =>
+    const settled = await Promise.allSettled(
+      Array.from({ length: count }, (_, i) => {
+        const figure = figurePages[i % figurePages.length];
+        return limiter(() =>
           generateFigureQuestionForSlot(marksPerQuestion, figure.base64, figure.mimeType, teacherId, tone, figure._id),
         );
-        if (q) questions.push(q);
-      } catch { /* skip failed slot */ }
-    }
+      }),
+    );
+    const questions = settled
+      .filter((r): r is PromiseFulfilledResult<object> => r.status === 'fulfilled' && r.value !== null)
+      .map(r => r.value);
     return { questions, requested: count, received: questions.length };
   }
 
