@@ -16,6 +16,7 @@ import {
   convertInchesToTwip,
 } from 'docx';
 import type { PaperStructure, PaperQuestion } from '../types/paperStructure.js';
+import { renderTextWithMath } from './latexToDocx.js';
 
 type DocChild = Paragraph | Table;
 
@@ -82,14 +83,6 @@ const NO_BORDERS    = { top: BORDER_NONE, bottom: BORDER_NONE, left: BORDER_NONE
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Strip $...$ and $$...$$ delimiters for plain-text Word output.
-// The LaTeX expression is kept; only the delimiter symbols are removed.
-function stripLatex(text: string): string {
-  return text
-    .replace(/\$\$([^$]+)\$\$/g, '$1')
-    .replace(/\$([^$]+)\$/g,     '$1');
-}
-
 function r(
   text: string,
   opts: { bold?: boolean; italics?: boolean; size?: number; color?: string } = {},
@@ -99,6 +92,11 @@ function r(
 
 function marksRun(marks: number): TextRun {
   return r(`  [${marks} Mark${marks !== 1 ? 's' : ''}]`, { bold: true });
+}
+
+// Returns inline paragraph children for text that may contain $…$ LaTeX.
+function mathRuns(text: string) {
+  return renderTextWithMath(text, { font: FONT, size: SZ_BODY });
 }
 
 function sp(after: number, before = 0) {
@@ -266,13 +264,13 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
     case 'multipleChoice':
     case 'multiSelect': {
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText), marksRun(q.marks)],
         spacing:  sp(80),
       }));
       const opts = (gen.options as Array<Record<string, unknown>> | undefined) ?? [];
       opts.forEach((opt, i) => {
         out.push(new Paragraph({
-          children: [r(`(${String.fromCharCode(65 + i)})  ${(opt.text as string) ?? ''}`)],
+          children: [r(`(${String.fromCharCode(65 + i)})  `), ...mathRuns((opt.text as string) ?? '')],
           indent:  { left: INDENT_OPT },
           spacing: sp(40),
         }));
@@ -291,14 +289,14 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
 
     case 'trueFalse':
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText), r('  [True / False]', { italics: true }), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText), r('  [True / False]', { italics: true }), marksRun(q.marks)],
         spacing: sp(200),
       }));
       break;
 
     case 'fillInBlanks':
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText), marksRun(q.marks)],
         spacing: sp(200),
       }));
       break;
@@ -309,12 +307,12 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
         spacing: sp(80),
       }));
       out.push(new Paragraph({
-        children: [r('Assertion (A):  ', { bold: true }), r((gen.assertion as string) ?? '')],
+        children: [r('Assertion (A):  ', { bold: true }), ...mathRuns((gen.assertion as string) ?? '')],
         indent:  { left: INDENT_Q },
         spacing: sp(60),
       }));
       out.push(new Paragraph({
-        children: [r('Reason (R):  ', { bold: true }), r((gen.reason as string) ?? '')],
+        children: [r('Reason (R):  ', { bold: true }), ...mathRuns((gen.reason as string) ?? '')],
         indent:  { left: INDENT_Q },
         spacing: sp(80),
       }));
@@ -337,7 +335,7 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
 
     case 'matchTheFollowing': {
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText || 'Match the following:'), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText || 'Match the following:'), marksRun(q.marks)],
         spacing: sp(80),
       }));
       const lefts  = (gen.leftItems  as string[] | undefined) ?? [];
@@ -372,13 +370,13 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
 
     case 'reordering': {
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText || 'Arrange the following in the correct order:'), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText || 'Arrange the following in the correct order:'), marksRun(q.marks)],
         spacing: sp(80),
       }));
       const items = (gen.items as string[] | undefined) ?? [];
       items.forEach((item, i) => {
         out.push(new Paragraph({
-          children: [r(`(${String.fromCharCode(97 + i)})  ${item}`)],
+          children: [r(`(${String.fromCharCode(97 + i)})  `), ...mathRuns(item)],
           indent:  { left: INDENT_OPT },
           spacing: sp(40),
         }));
@@ -410,7 +408,7 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
     case 'shortAnswer': {
       const wl = gen.wordLimit as { min?: number; max?: number } | undefined;
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(qText), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(qText), marksRun(q.marks)],
         spacing: sp(wl ? 40 : 200),
       }));
       if (wl) {
@@ -427,14 +425,15 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
       const preamble = (gen.preamble as string) ?? '';
       const parts    = (gen.parts as Array<{ label: string; marks: number; question: string }> | undefined) ?? [];
       out.push(new Paragraph({
-        children: [r(`Q${num}.  `, { bold: true }), r(preamble), marksRun(q.marks)],
+        children: [r(`Q${num}.  `, { bold: true }), ...mathRuns(preamble), marksRun(q.marks)],
         spacing: sp(80),
       }));
       parts.forEach(pt => {
         out.push(new Paragraph({
           children: [
-            r(`(${pt.label})  ${pt.question}  `),
-            r(`[${pt.marks} Mark${pt.marks !== 1 ? 's' : ''}]`, { bold: true }),
+            r(`(${pt.label})  `),
+            ...mathRuns(pt.question),
+            r(`  [${pt.marks} Mark${pt.marks !== 1 ? 's' : ''}]`, { bold: true }),
           ],
           indent:  { left: INDENT_Q },
           spacing: sp(80),
@@ -471,9 +470,8 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
     case 'figureBased': {
       const imageBase64   = (gen.imageBase64   as string | undefined) ?? '';
       const imageMimeType = (gen.imageMimeType as string | undefined) ?? 'image/jpeg';
-      const questionText  = stripLatex((gen.questionText as string | undefined) ?? '');
+      const questionText  = (gen.questionText as string | undefined) ?? '';
       const subType       = (gen.subType as string | undefined) ?? 'mcq';
-      const useLatex      = !!(gen.useLatex as boolean | undefined);
 
       out.push(new Paragraph({
         children: [r(`Q${num}.  `, { bold: true }), marksRun(q.marks)],
@@ -499,10 +497,7 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
       }
 
       out.push(new Paragraph({
-        children: [
-          r(questionText),
-          ...(useLatex ? [r('  *', { italics: true, size: SZ_SMALL, color: '888888' })] : []),
-        ],
+        children: mathRuns(questionText),
         indent:  { left: INDENT_Q },
         spacing: sp(60),
       }));
@@ -511,7 +506,7 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
         const opts = (gen.options as string[] | undefined) ?? [];
         opts.forEach((opt, i) => {
           out.push(new Paragraph({
-            children: [r(`(${String.fromCharCode(65 + i)})  ${stripLatex(opt)}`)],
+            children: [r(`(${String.fromCharCode(65 + i)})  `), ...mathRuns(opt)],
             indent:  { left: INDENT_OPT },
             spacing: sp(40),
           }));
@@ -522,14 +517,6 @@ function renderQuestion(q: PaperQuestion, num: number): DocChild[] {
           children: [r('Answer:  ___________________________________________', { italics: true, color: '999999' })],
           indent:  { left: INDENT_Q },
           spacing: sp(40),
-        }));
-      }
-
-      if (useLatex) {
-        out.push(new Paragraph({
-          children: [r('* Expressions rendered as LaTeX in the digital version.', { italics: true, size: SZ_SMALL, color: '888888' })],
-          indent:  { left: INDENT_Q },
-          spacing: sp(60),
         }));
       }
 
@@ -562,7 +549,7 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
     case 'multiSelect': {
       const ca  = gen.correctAnswer as string | string[];
       const ans = Array.isArray(ca) ? ca.join(';  ') : (ca ?? '');
-      out.push(new Paragraph({ children: [prefix, r(ans)], spacing: sp(80) }));
+      out.push(new Paragraph({ children: [prefix, ...mathRuns(ans)], spacing: sp(80) }));
       break;
     }
 
@@ -571,11 +558,11 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       break;
 
     case 'fillInBlanks':
-      out.push(new Paragraph({ children: [prefix, r((gen.correctAnswer as string) ?? '')], spacing: sp(80) }));
+      out.push(new Paragraph({ children: [prefix, ...mathRuns((gen.correctAnswer as string) ?? '')], spacing: sp(80) }));
       break;
 
     case 'assertionReason':
-      out.push(new Paragraph({ children: [prefix, r((gen.correctAnswer as string) ?? '')], spacing: sp(80) }));
+      out.push(new Paragraph({ children: [prefix, ...mathRuns((gen.correctAnswer as string) ?? '')], spacing: sp(80) }));
       break;
 
     case 'matchTheFollowing': {
@@ -583,7 +570,7 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       out.push(new Paragraph({ children: [prefix], spacing: sp(40) }));
       pairs.forEach((p, i) => {
         out.push(new Paragraph({
-          children: [r(`${i + 1}.  ${p.left}  →  ${p.right}`)],
+          children: [r(`${i + 1}.  `), ...mathRuns(p.left), r('  →  '), ...mathRuns(p.right)],
           indent:  { left: INDENT_Q },
           spacing: sp(30),
         }));
@@ -609,7 +596,7 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       out.push(new Paragraph({ children: [prefix], spacing: sp(40) }));
       if (gen.modelAnswer) {
         out.push(new Paragraph({
-          children: [r('Model Answer:  ', { bold: true }), r((gen.modelAnswer as string) ?? '')],
+          children: [r('Model Answer:  ', { bold: true }), ...mathRuns((gen.modelAnswer as string) ?? '')],
           indent:  { left: INDENT_Q },
           spacing: sp(40),
         }));
@@ -623,7 +610,7 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
         }));
         scheme.forEach(pt => {
           out.push(new Paragraph({
-            children: [r(`•  ${pt.point}  [${pt.marks}m]`)],
+            children: [r(`•  `), ...mathRuns(pt.point), r(`  [${pt.marks}m]`)],
             indent:  { left: convertInchesToTwip(0.65) },
             spacing: sp(20),
           }));
@@ -631,7 +618,7 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       }
       if (gen.explanation) {
         out.push(new Paragraph({
-          children: [r((gen.explanation as string) ?? '', { italics: true, color: '555555', size: SZ_SMALL })],
+          children: renderTextWithMath((gen.explanation as string) ?? '', { font: FONT, size: SZ_SMALL, italics: true, color: '555555' }),
           indent:  { left: INDENT_Q },
           spacing: sp(120),
         }));
@@ -646,14 +633,14 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       const parts = (gen.parts as Array<{ label: string; modelAnswer: string }> | undefined) ?? [];
       parts.forEach(pt => {
         out.push(new Paragraph({
-          children: [r(`(${pt.label})  `, { bold: true }), r(pt.modelAnswer ?? '')],
+          children: [r(`(${pt.label})  `, { bold: true }), ...mathRuns(pt.modelAnswer ?? '')],
           indent:  { left: INDENT_Q },
           spacing: sp(60),
         }));
       });
       if (gen.explanation) {
         out.push(new Paragraph({
-          children: [r((gen.explanation as string) ?? '', { italics: true, color: '555555', size: SZ_SMALL })],
+          children: renderTextWithMath((gen.explanation as string) ?? '', { font: FONT, size: SZ_SMALL, italics: true, color: '555555' }),
           indent:  { left: INDENT_Q },
           spacing: sp(120),
         }));
@@ -669,14 +656,14 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
       const modelAnswer = (gen.modelAnswer as string[]) ?? [];
       items.forEach((item, i) => {
         out.push(new Paragraph({
-          children: [r(`${i + 1}.  ${item}:  `, { bold: true }), r(modelAnswer[i] ?? '')],
+          children: [r(`${i + 1}.  `), ...mathRuns(item), r(':  '), ...mathRuns(modelAnswer[i] ?? '')],
           indent:  { left: INDENT_Q },
           spacing: sp(30),
         }));
       });
       if (gen.explanation) {
         out.push(new Paragraph({
-          children: [r((gen.explanation as string) ?? '', { italics: true, color: '555555', size: SZ_SMALL })],
+          children: renderTextWithMath((gen.explanation as string) ?? '', { font: FONT, size: SZ_SMALL, italics: true, color: '555555' }),
           indent:  { left: INDENT_Q },
           spacing: sp(120),
         }));
@@ -687,25 +674,25 @@ function renderAnswer(q: PaperQuestion, num: number): DocChild[] {
     }
 
     case 'figureBased': {
-      const correctAnswer = stripLatex((gen.correctAnswer as string | undefined) ?? '');
+      const correctAnswer = (gen.correctAnswer as string | undefined) ?? '';
       const subType       = (gen.subType as string | undefined) ?? 'mcq';
       out.push(new Paragraph({ children: [prefix], spacing: sp(40) }));
       if (subType === 'mcq') {
         out.push(new Paragraph({
-          children: [r('Correct option:  ', { bold: true }), r(correctAnswer)],
+          children: [r('Correct option:  ', { bold: true }), ...mathRuns(correctAnswer)],
           indent:  { left: INDENT_Q },
           spacing: sp(40),
         }));
       } else {
         out.push(new Paragraph({
-          children: [r('Model Answer:  ', { bold: true }), r(correctAnswer)],
+          children: [r('Model Answer:  ', { bold: true }), ...mathRuns(correctAnswer)],
           indent:  { left: INDENT_Q },
           spacing: sp(40),
         }));
       }
       if (gen.explanation) {
         out.push(new Paragraph({
-          children: [r(stripLatex((gen.explanation as string) ?? ''), { italics: true, color: '555555', size: SZ_SMALL })],
+          children: renderTextWithMath((gen.explanation as string) ?? '', { font: FONT, size: SZ_SMALL, italics: true, color: '555555' }),
           indent:  { left: INDENT_Q },
           spacing: sp(120),
         }));

@@ -12,8 +12,9 @@ import type { PaperStructure, PaperQuestion, PaperSection } from '../types/paper
 import type { ChapterInput } from './slotAllocator.js';
 
 export interface FigureImage {
-  base64:   string;
-  mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  _id?:      string;   // ChapterFigurePage._id — set when sourced from the DB
+  base64:    string;
+  mimeType:  'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
   filename?: string;
 }
 
@@ -177,6 +178,7 @@ async function generateFigureQuestion(
       marks:         m,
       imageBase64:   figure.base64,
       imageMimeType: figure.mimeType,
+      ...(figure._id ? { figurePageId: figure._id } : {}),
       questionText:  isMcq
         ? `In the given figure, if $\\angle A + \\angle B = 90°$, then $\\angle A$ and $\\angle B$ are called:`
         : `The figure shows a right triangle with legs $a$ and $b$ and hypotenuse $c$. Using the Pythagorean theorem $a^2 + b^2 = c^2$, find $c$ when $a = 3$ cm and $b = 4$ cm. Show your working.`,
@@ -266,6 +268,7 @@ ${subType === 'mcq'
           ...result.data,
           imageBase64:   figure.base64,
           imageMimeType: figure.mimeType,
+          ...(figure._id ? { figurePageId: figure._id } : {}),
           marks:         m,
         };
       }
@@ -420,6 +423,22 @@ export interface PaperGenerateOptions {
   teacherId:  string;
   tone?:      'formal-board-exam' | 'neutral' | 'conversational';
   requestId?: string;
+}
+
+// Thin wrapper used by generateTypeViaSlots (non-paper mode) to call the vision
+// API without needing to import PaperQuestion or PaperGenerateOptions directly.
+export async function generateFigureQuestionForSlot(
+  marks:         number,
+  base64:        string,
+  mimeType:      FigureImage['mimeType'],
+  teacherId:     string,
+  tone?:         PaperGenerateOptions['tone'],
+  figurePageId?: string,
+): Promise<object | null> {
+  const question = { number: 1, type: 'figureBased' as const, marks, generated: null };
+  const figure:   FigureImage = { base64, mimeType, ...(figurePageId ? { _id: figurePageId } : {}) };
+  const options:  PaperGenerateOptions = { teacherId, tone };
+  return generateFigureQuestion(question, figure, options);
 }
 
 export interface PaperGenerateResult {

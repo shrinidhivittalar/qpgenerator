@@ -8,6 +8,7 @@ import { User } from '../models/User.js';
 import { GenerationRun } from '../models/GenerationRun.js';
 import Scheme from '../models/Scheme.js';
 import TextbookChapter from '../models/TextbookChapter.js';
+import ChapterFigurePage from '../models/ChapterFigurePage.js';
 import {
   generateSet, generateTypeViaSlots, runTypeLoop, makeTrackedGenerateFn, TypeConfig,
 } from '../ai/generator.js';
@@ -50,6 +51,91 @@ const GenerateBodySchema = z.object({
 const RegenerateBodySchema = z.object({
   type: z.string(),
 });
+
+// ── Figure-image helpers ──────────────────────────────────────────────────────
+// imageBase64 can be hundreds of KB per question. Strip it before writing to
+// MongoDB (keeping figurePageId so images can be re-fetched), then inject back
+// from ChapterFigurePage at export time. Prevents the QuestionSet document from
+// approaching the 16 MB MongoDB per-document limit.
+
+type AnyBlock = { questionType: string; totalMarks: number; questions: Record<string, unknown>[] };
+
+function stripImagesFromBlocks(blocks: AnyBlock[]): AnyBlock[] {
+  return blocks.map(block => {
+    const plain: AnyBlock = typeof (block as any).toObject === 'function'
+      ? (block as any).toObject() as AnyBlock
+      : block;
+    return {
+      ...plain,
+      questions: plain.questions.map(q => {
+        if (!q.imageBase64) return q;
+        const { imageBase64: _b, imageMimeType: _m, ...rest } = q as any;
+        return rest;
+      }),
+    };
+  });
+}
+
+function stripImagesFromStructure(structure: any): any {
+  return {
+    ...structure,
+    sections: (structure.sections ?? []).map((section: any) => ({
+      ...section,
+      questions: (section.questions ?? []).map((q: any) => {
+        if (!q.generated?.imageBase64) return q;
+        const { imageBase64: _b, imageMimeType: _m, ...restGen } = q.generated;
+        return { ...q, generated: restGen };
+      }),
+    })),
+  };
+}
+
+async function injectImagesIntoBlocks(blocks: AnyBlock[]): Promise<AnyBlock[]> {
+  const ids = blocks.flatMap(b =>
+    b.questions.map((q: any) => q.figurePageId).filter(Boolean),
+  );
+  if (ids.length === 0) return blocks;
+  const pages = await ChapterFigurePage.find({ _id: { $in: ids } }).lean();
+  const pageMap = new Map(pages.map(p => [p._id.toString(), p]));
+  return blocks.map(block => {
+    // Mongoose subdocuments store schema properties as prototype getters, not own
+    // enumerable properties — spread loses them. toObject() converts to a plain object.
+    const plain: AnyBlock = typeof (block as any).toObject === 'function'
+      ? (block as any).toObject() as AnyBlock
+      : block;
+    return {
+      ...plain,
+      questions: plain.questions.map((q: any) => {
+        if (!q.figurePageId) return q;
+        const page = pageMap.get(q.figurePageId);
+        return page ? { ...q, imageBase64: page.base64, imageMimeType: page.mimeType ?? 'image/png' } : q;
+      }),
+    };
+  });
+}
+
+async function injectImagesIntoStructure(structure: any): Promise<any> {
+  const ids = (structure.sections ?? []).flatMap((s: any) =>
+    (s.questions ?? []).map((q: any) => q.generated?.figurePageId).filter(Boolean),
+  );
+  if (ids.length === 0) return structure;
+  const pages = await ChapterFigurePage.find({ _id: { $in: ids } }).lean();
+  const pageMap = new Map(pages.map(p => [p._id.toString(), p]));
+  return {
+    ...structure,
+    sections: (structure.sections ?? []).map((section: any) => ({
+      ...section,
+      questions: (section.questions ?? []).map((q: any) => {
+        const fpId = q.generated?.figurePageId;
+        if (!fpId) return q;
+        const page = pageMap.get(fpId);
+        return page
+          ? { ...q, generated: { ...q.generated, imageBase64: page.base64, imageMimeType: page.mimeType ?? 'image/png' } }
+          : q;
+      }),
+    })),
+  };
+}
 
 // ── POST /api/sets/create ─────────────────────────────────────────────────────
 // Creates an empty QuestionSet for chapter-based mode where no source PDF is
@@ -126,15 +212,25 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
   if (!hasBudget) { res.status(429).json({ error: 'Daily token budget exceeded.' }); return; }
 
   // Resolve chapters for slot path
-  let resolvedChapters: ChapterInput[] = [];
+  let resolvedChapters:    ChapterInput[] = [];
+  let resolvedFigurePages: Array<{ _id: string; base64: string; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' }> = [];
   if (chapterIds && chapterIds.length > 0) {
     const validIds = chapterIds.filter(id => mongoose.isValidObjectId(id));
     if (validIds.length > 0) {
-      const docs = await TextbookChapter.find({ _id: { $in: validIds }, teacherId: userId }).lean();
+      const [docs, figurePageDocs] = await Promise.all([
+        TextbookChapter.find({ _id: { $in: validIds }, teacherId: userId }).lean(),
+        ChapterFigurePage.find({ chapterId: { $in: validIds }, teacherId: userId })
+          .sort({ chapterId: 1, pageNum: 1 })
+          .lean(),
+      ]);
       docs.sort((a, b) => a.chapterNumber - b.chapterNumber);
       resolvedChapters = docs.map(c => ({
         id: c._id.toString(), name: c.title, weightPercent: c.weightPercent,
         sourceText: c.sourceText, highValueSnippets: c.highValueSnippets,
+      }));
+      resolvedFigurePages = figurePageDocs.map(p => ({
+        _id: p._id.toString(), base64: p.base64,
+        mimeType: (p.mimeType ?? 'image/png') as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
       }));
     }
   }
@@ -143,6 +239,14 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
   let blocks:     QuestionBlock[] = [];
   let errors:     Array<{ type: string; requested: number; received: number; error: string }> = [];
   let tokensUsed = 0;
+
+  logger.info('generation_slot_context', {
+    requestId: (req as any).requestId,
+    userId,
+    chapterCount:    resolvedChapters.length,
+    figurePageCount: resolvedFigurePages.length,
+    types: activeTypeConfig.map(tc => tc.type),
+  });
 
   try {
     if (resolvedChapters.length > 0) {
@@ -153,7 +257,7 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
             tc.type, tc.count, tc.marksPerQuestion, resolvedChapters,
             tc.difficulty ?? undefined,
             userId, tone ?? 'formal-board-exam', bankId ?? undefined, limiter,
-            typeIndex, (tc as any).mapItems,
+            typeIndex, (tc as any).mapItems, resolvedFigurePages,
           ).then(r => ({ type: tc.type, marksPerQuestion: tc.marksPerQuestion, ...r })),
         ),
       );
@@ -161,19 +265,25 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
       for (const outcome of slotSettled) {
         if (outcome.status === 'rejected') continue;
         const { type, marksPerQuestion, questions, requested, received } = outcome.value;
-        if (received >= requested) {
+        if (received === 0) {
+          // Nothing at all — surface as an error, no block.
+          errors.push({
+            type, requested, received,
+            error: `Could not generate any ${type} questions from the selected chapters.`,
+          });
+        } else {
+          // Accept whatever was generated — partial is always better than nothing.
           blocks.push({
             questionType: type, status: 'success',
             totalMarks:   questions.reduce((s: number, q: any) => s + ((q.marks as number) ?? marksPerQuestion), 0),
             questions:    questions.slice(0, requested),
           });
-        } else {
-          errors.push({
-            type, requested, received,
-            error: received === 0
-              ? `Could not generate any ${type} questions from the selected chapters.`
-              : `Insufficient chapter content to generate ${requested} ${type} questions.`,
-          });
+          if (received < requested) {
+            errors.push({
+              type, requested, received,
+              error: `Generated ${received} of ${requested} ${type} questions — add more chapter content to reach the full count.`,
+            });
+          }
         }
       }
       assignGlobalIds(blocks);
@@ -210,7 +320,7 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
   if (bankId)                       set.bankId            = bankId as any;
   if (resolvedChapters.length > 0)  set.chapterIds        = resolvedChapters.map(c => c.id) as any;
 
-  set.questionBlocks   = blocks as any;
+  set.questionBlocks   = stripImagesFromBlocks(blocks as AnyBlock[]) as any;
   set.generationErrors = errors as any;
   set.typeConfig       = activeTypeConfig as any;
   set.status           = 'draft';
@@ -351,13 +461,23 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
 
   // Re-resolve chapters used in the original generation
   let resolvedChapters: ChapterInput[] = [];
+  let regenFigurePages: Array<{ _id: string; base64: string; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif' }> = [];
   const storedChapterIds: string[] = ((set.chapterIds as any[]) ?? []).map((id: any) => id.toString());
   if (storedChapterIds.length > 0) {
-    const docs = await TextbookChapter.find({ _id: { $in: storedChapterIds }, teacherId: userId }).lean();
+    const [docs, figurePageDocs] = await Promise.all([
+      TextbookChapter.find({ _id: { $in: storedChapterIds }, teacherId: userId }).lean(),
+      ChapterFigurePage.find({ chapterId: { $in: storedChapterIds }, teacherId: userId })
+        .sort({ chapterId: 1, pageNum: 1 })
+        .lean(),
+    ]);
     docs.sort((a, b) => a.chapterNumber - b.chapterNumber);
     resolvedChapters = docs.map(c => ({
       id: c._id.toString(), name: c.title, weightPercent: c.weightPercent,
       sourceText: c.sourceText, highValueSnippets: c.highValueSnippets,
+    }));
+    regenFigurePages = figurePageDocs.map(p => ({
+      _id: p._id.toString(), base64: p.base64,
+      mimeType: (p.mimeType ?? 'image/png') as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
     }));
   }
 
@@ -381,6 +501,7 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
         tc.type, tc.count, tc.marksPerQuestion, resolvedChapters,
         tc.difficulty ?? undefined,
         userId, ((set.tone as string) ?? 'formal-board-exam') as 'formal-board-exam' | 'neutral' | 'conversational', (set.bankId as string) ?? undefined, limiter,
+        0, undefined, regenFigurePages,
       );
       if (slotResult.received >= slotResult.requested) {
         newResult = { status: 'success', questions: slotResult.questions.slice(0, slotResult.requested) };
@@ -445,7 +566,7 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
   }
 
   assignGlobalIds(blocks);
-  set.questionBlocks = blocks as any;
+  set.questionBlocks = stripImagesFromBlocks(blocks as AnyBlock[]) as any;
   set.markModified('questionBlocks');
   await set.save();
 
@@ -467,17 +588,10 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
 // provided in the request body). Fills every question slot and stores the
 // filled structure back into the QuestionSet.
 
-const FigureImageSchema = z.object({
-  base64:   z.string().min(1),
-  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
-  filename: z.string().optional(),
-});
-
 const GeneratePaperBodySchema = z.object({
   paperStructure: z.record(z.unknown()),  // validated as PaperStructure below
   chapterIds:     z.array(z.string()).min(1),
   tone:           ToneOption.optional(),
-  figureImages:   z.array(FigureImageSchema).max(20).optional(),
 });
 
 router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, res: Response) => {
@@ -499,13 +613,18 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
     res.status(400).json({ error: 'Invalid paperStructure: ' + (structureResult.error.issues[0]?.message ?? 'validation failed') }); return;
   }
 
-  const { chapterIds, tone, figureImages } = bodyResult.data;
+  const { chapterIds, tone } = bodyResult.data;
   const validIds = chapterIds.filter(id => mongoose.isValidObjectId(id));
   if (validIds.length === 0) {
     res.status(400).json({ error: 'No valid chapter IDs provided.' }); return;
   }
 
-  const docs = await TextbookChapter.find({ _id: { $in: validIds }, teacherId: userId }).lean();
+  const [docs, figurePageDocs] = await Promise.all([
+    TextbookChapter.find({ _id: { $in: validIds }, teacherId: userId }).lean(),
+    ChapterFigurePage.find({ chapterId: { $in: validIds }, teacherId: userId })
+      .sort({ chapterId: 1, pageNum: 1 })
+      .lean(),
+  ]);
   if (docs.length === 0) {
     res.status(400).json({ error: 'No accessible chapters found for the provided IDs.' }); return;
   }
@@ -514,6 +633,11 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
   const resolvedChapters: ChapterInput[] = docs.map(c => ({
     id: c._id.toString(), name: c.title, weightPercent: c.weightPercent,
     sourceText: c.sourceText, highValueSnippets: c.highValueSnippets,
+  }));
+
+  const allFigureImages = figurePageDocs.map(p => ({
+    _id: p._id.toString(), base64: p.base64,
+    mimeType: (p.mimeType ?? 'image/png') as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
   }));
 
   const hasBudget = await checkAndReserveBudget(userId);
@@ -527,7 +651,7 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
       structureResult.data,
       resolvedChapters,
       { teacherId: userId, tone: tone ?? 'formal-board-exam', requestId: (req as any).requestId },
-      figureImages ?? [],
+      allFigureImages,
     );
   } catch {
     res.status(503).json({ error: 'AI service unavailable. Please try again.' }); return;
@@ -535,7 +659,7 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
 
   const durationMs = Date.now() - startTime;
 
-  (set as any).paperStructure = result.structure;
+  (set as any).paperStructure = stripImagesFromStructure(result.structure);
   set.chapterIds = resolvedChapters.map(c => c.id) as any;
   if (tone) set.tone = tone as any;
   set.status = 'draft';
@@ -578,7 +702,8 @@ router.get('/:id/export', requireRole('teacher'), async (req: Request, res: Resp
   }
 
   try {
-    const buffer = await buildQuestionBlocksDoc(set.fileName, blocks);
+    const blocksWithImages = await injectImagesIntoBlocks(blocks as AnyBlock[]);
+    const buffer = await buildQuestionBlocksDoc(set.fileName, blocksWithImages);
     const safeName = set.fileName
       .replace(/[^\w\s-]/g, '')
       .trim()
@@ -619,7 +744,8 @@ router.get('/:id/export/paper', requireRole('teacher'), async (req: Request, res
   }
 
   try {
-    const buffer = await buildQuestionPaperDoc(structureResult.data);
+    const structureWithImages = await injectImagesIntoStructure(structureResult.data);
+    const buffer = await buildQuestionPaperDoc(structureWithImages);
     const safeTitle = (structureResult.data.title || 'question-paper')
       .replace(/[^\w\s-]/g, '')
       .trim()

@@ -2,3 +2,9 @@ node_modules/
 dist/
 server/.env
 *.env.local
+
+# Test output and binary assets — not source code
+*.pdf
+*.docx
+server/src/test/*.png
+server/src/test/fig_output/

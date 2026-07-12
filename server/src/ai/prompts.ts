@@ -134,7 +134,23 @@ commentary before or after.
 - Do NOT include an "id" field — IDs are assigned by the system after \
 generation.
 - Every question must match the exact schema below, with no additional \
-fields beyond what is shown.`;
+fields beyond what is shown.
+
+MATH / LATEX ENCODING RULES (CRITICAL — violations corrupt the output)
+- Wrap EVERY mathematical expression in dollar-sign delimiters: $...$. \
+Examples: "$x^2$", "$\\frac{a}{b}$", "$\\sqrt{b^2 - 4ac}$".
+- Inside a JSON string, ALL LaTeX backslash commands MUST use a double \
+backslash so the JSON parser sees one backslash. Examples: \
+"$\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}$", "$\\times$", "$\\theta$", \
+"$\\alpha + \\beta$". A single backslash before a letter is a JSON \
+escape sequence and will corrupt the command (\\t becomes a tab, \
+\\n a newline, etc.).
+- Plain numbers and single-letter variables in running text do not need \
+dollar signs. Use them only when you write a formula, expression, \
+equation, or symbol that a student would expect to see typeset.
+- NEVER use $ as a currency symbol. Write monetary amounts as plain \
+numbers (e.g. 8000, 500) or use the appropriate symbol (₹, USD). \
+Using $8000 will break the math renderer and corrupt the question text.`;
 
 // ── Per-type schema + type-specific rules ─────────────────────────────────────
 

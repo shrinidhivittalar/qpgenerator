@@ -10,6 +10,7 @@ import rateLimit from 'express-rate-limit';
 import mongoSanitize from 'express-mongo-sanitize';
 
 import { requestIdMiddleware } from './middleware/requestId.js';
+import { logger } from './lib/logger.js';
 import { requireAuth } from './middleware/auth.js';
 import { requireRole } from './middleware/requireRole.js';
 import healthRouter from './routes/health.js';
@@ -34,6 +35,10 @@ const apiLimiter = rateLimit({
 
 app.use(helmet());
 app.use(requestIdMiddleware);
+app.use((req, _res, next) => {
+  logger.info('req', { method: req.method, path: req.path });
+  next();
+});
 app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());

@@ -8,8 +8,10 @@ import { extractTextPerPage } from '../ai/pdfStructure.js';
 import { extractOutline } from '../ai/pdfStructure.js';
 import { detectHeadingsHeuristic } from '../ai/chapterHeuristics.js';
 import { detectHeadingsViaLLM } from '../ai/chapterLlmDetection.js';
+import { renderFigurePages } from '../ai/pdfRenderer.js';
 import TextbookUploadDraft from '../models/TextbookUploadDraft.js';
 import TextbookChapter from '../models/TextbookChapter.js';
+import ChapterFigurePage from '../models/ChapterFigurePage.js';
 import { logger } from '../lib/logger.js';
 
 const router = Router();
@@ -78,14 +80,26 @@ router.post('/upload', async (req: Request, res: Response) => {
   }
 
   let pages: string[];
+  let figurePages: Awaited<ReturnType<typeof renderFigurePages>> = [];
   try {
-    pages = await extractTextPerPage(req.file.buffer);
+    [pages, figurePages] = await Promise.all([
+      extractTextPerPage(req.file.buffer),
+      renderFigurePages(req.file.buffer).catch(() => []),
+    ]);
   } catch {
     res.status(422).json({ error: 'Could not extract text from this PDF.' });
     return;
   }
 
   const fullText = pages.join('\n\n');
+
+  // Build char offset table: pageOffsets[i] = char offset where page i starts in fullText
+  const pageOffsets: number[] = [];
+  let offset = 0;
+  for (const page of pages) {
+    pageOffsets.push(offset);
+    offset += page.length + 2; // +2 for the '\n\n' separator between pages
+  }
 
   if (fullText.trim().length < 100) {
     res.status(422).json({
@@ -146,9 +160,16 @@ router.post('/upload', async (req: Request, res: Response) => {
   }));
 
   const draft = await TextbookUploadDraft.create({
-    teacherId:  (req as any).userId,
-    subject:    subject.trim(),
+    teacherId:   (req as any).userId,
+    subject:     subject.trim(),
     fullText,
+    pageOffsets,
+    figurePages: figurePages.map(p => ({
+      pageNum: p.pageNum,
+      base64:  p.base64,
+      width:   p.width,
+      height:  p.height,
+    })),
     candidates: withEndOffsets.map((c, i) => ({
       tempId:          `draft-${i}`,
       suggestedTitle:  c.title,
@@ -258,6 +279,27 @@ router.post('/:draftId/confirm', async (req: Request, res: Response) => {
       sourceText,
       highValueSnippets: entry.highValueSnippets ?? [],
     });
+
+    // Distribute figure pages that fall within this chapter's char range.
+    // A figure page belongs to this chapter if its page start offset is within
+    // [startOffset, endOffset).
+    const chapterFigures = draft.figurePages.filter(fp => {
+      const pageStart = draft.pageOffsets[fp.pageNum - 1] ?? 0;
+      return pageStart >= primary.startOffset && pageStart < primary.endOffset;
+    });
+
+    if (chapterFigures.length > 0) {
+      await ChapterFigurePage.insertMany(
+        chapterFigures.map(fp => ({
+          chapterId: chapter._id,
+          teacherId: (req as any).userId,
+          pageNum:   fp.pageNum,
+          base64:    fp.base64,
+          width:     fp.width,
+          height:    fp.height,
+        })),
+      );
+    }
 
     created.push(chapter._id.toString());
   }

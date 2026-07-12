@@ -153,6 +153,7 @@ export interface ChapterInfo {
   chapterNumber:     number;
   weightPercent:     number;
   subject:           string;
+  figurePageCount:   number;
 }
 
 export interface BlueprintChapter {

@@ -1,11 +1,14 @@
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
+import { Types } from 'mongoose';
 
 import { requireAuth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/requireRole.js';
 import { extractText } from '../ai/extractor.js';
+import { renderFigurePages } from '../ai/pdfRenderer.js';
 import TextbookChapter from '../models/TextbookChapter.js';
+import ChapterFigurePage from '../models/ChapterFigurePage.js';
 import { logger } from '../lib/logger.js';
 
 const router = Router();
@@ -105,6 +108,36 @@ router.post('/upload', async (req: Request, res: Response) => {
     highValueSnippets: snippets,
   });
 
+  // Render figure pages and store each as its own document — keeps the
+  // chapter document small regardless of how large the source PDF is.
+  try {
+    const figurePages = await renderFigurePages(req.file.buffer);
+    if (figurePages.length > 0) {
+      await ChapterFigurePage.insertMany(
+        figurePages.map(p => ({
+          chapterId: chapter._id,
+          teacherId: req.userId,
+          pageNum:   p.pageNum,
+          base64:    p.base64,
+          width:     p.width,
+          height:    p.height,
+        })),
+      );
+    }
+    logger.info('figure_pages_stored', {
+      requestId: req.requestId,
+      userId: req.userId,
+      chapterId: chapter._id.toString(),
+      count: figurePages.length,
+    });
+  } catch (err) {
+    logger.warn('figure_pages_render_failed', {
+      requestId: req.requestId,
+      chapterId: chapter._id.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   logger.info('chapter_uploaded', {
     requestId: req.requestId,
     userId: req.userId,
@@ -131,23 +164,95 @@ router.get('/', async (req: Request, res: Response) => {
   const filter: Record<string, unknown> = { teacherId: req.userId };
   if (subject) filter.subject = subject;
 
-  const chapters = await TextbookChapter.find(filter)
-    .select('title chapterNumber weightPercent subject updatedAt')
-    .sort({ chapterNumber: 1 })
-    .lean();
+  const [chapters, figureCounts] = await Promise.all([
+    TextbookChapter.find(filter)
+      .select('title chapterNumber weightPercent subject updatedAt')
+      .sort({ chapterNumber: 1 })
+      .lean(),
+    ChapterFigurePage.aggregate([
+      { $match: { teacherId: new Types.ObjectId(req.userId) } },
+      { $group: { _id: '$chapterId', count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const figureCountMap = new Map(
+    (figureCounts as Array<{ _id: unknown; count: number }>)
+      .map(f => [f._id?.toString() ?? '', f.count]),
+  );
 
   const totalWeightPercent = chapters.reduce((sum, c) => sum + c.weightPercent, 0);
 
   res.json({
     chapters: chapters.map(c => ({
-      _id:           c._id.toString(),
-      chapterName:   c.title,
-      chapterNumber: c.chapterNumber,
-      weightPercent: c.weightPercent,
-      subject:       c.subject,
+      _id:             c._id.toString(),
+      chapterName:     c.title,
+      chapterNumber:   c.chapterNumber,
+      weightPercent:   c.weightPercent,
+      subject:         c.subject,
+      figurePageCount: figureCountMap.get(c._id.toString()) ?? 0,
     })),
     totalWeightPercent,
   });
+});
+
+router.post('/:id/scan-figures', async (req: Request, res: Response) => {
+  try {
+    await handleMulterUpload(req, res);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === 'NON_PDF') {
+      res.status(400).json({ error: 'Only PDF files are accepted.' });
+      return;
+    }
+    res.status(400).json({ error: 'File upload failed.' });
+    return;
+  }
+
+  if (!req.file) {
+    res.status(400).json({ error: 'No file uploaded.' });
+    return;
+  }
+
+  const chapter = await TextbookChapter.findById(req.params.id).lean();
+  if (!chapter) {
+    res.status(404).json({ error: 'Chapter not found.' });
+    return;
+  }
+  if (chapter.teacherId.toString() !== req.userId) {
+    res.status(403).json({ error: "You don't have permission to do this." });
+    return;
+  }
+
+  try {
+    const figurePages = await renderFigurePages(req.file.buffer);
+    await ChapterFigurePage.deleteMany({ chapterId: chapter._id });
+    if (figurePages.length > 0) {
+      await ChapterFigurePage.insertMany(
+        figurePages.map(p => ({
+          chapterId: chapter._id,
+          teacherId: req.userId,
+          pageNum:   p.pageNum,
+          base64:    p.base64,
+          width:     p.width,
+          height:    p.height,
+        })),
+      );
+    }
+    logger.info('figure_pages_rescanned', {
+      requestId: req.requestId,
+      userId: req.userId,
+      chapterId: chapter._id.toString(),
+      count: figurePages.length,
+    });
+    res.json({ figurePageCount: figurePages.length });
+  } catch (err) {
+    logger.warn('figure_pages_render_failed', {
+      requestId: req.requestId,
+      chapterId: chapter._id.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Figure detection failed.' });
+  }
 });
 
 router.delete('/:id', async (req: Request, res: Response) => {
@@ -163,7 +268,10 @@ router.delete('/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  await TextbookChapter.deleteOne({ _id: chapter._id });
+  await Promise.all([
+    TextbookChapter.deleteOne({ _id: chapter._id }),
+    ChapterFigurePage.deleteMany({ chapterId: chapter._id }),
+  ]);
 
   logger.info('chapter_deleted', {
     requestId: req.requestId,

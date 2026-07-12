@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../auth/tokens.js';
+import { logger } from '../lib/logger.js';
 
 declare global {
   namespace Express {
@@ -13,6 +14,7 @@ declare global {
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
+    logger.warn('auth_rejected', { reason: 'no_bearer', path: req.path });
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
@@ -23,6 +25,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     req.role = payload.role;
     next();
   } catch {
+    logger.warn('auth_rejected', { reason: 'invalid_token', path: req.path });
     res.status(401).json({ error: 'Unauthorized' });
   }
 }

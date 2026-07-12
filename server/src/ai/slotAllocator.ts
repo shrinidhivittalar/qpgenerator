@@ -78,7 +78,7 @@ export async function allocateSlots(
         type,
         difficulty:       difficulties[j],
         marksPerQuestion,
-        sourceExcerpt:    pickExcerpt(chapter.sourceText, chapter.highValueSnippets, j, windowSize),
+        sourceExcerpt:    pickExcerpt(chapter.sourceText, chapter.highValueSnippets, j, windowSize, chapterCount),
       });
     }
   }
@@ -102,6 +102,7 @@ export function pickExcerpt(
   highValueSnippets: string[],
   slotIndex:         number,
   windowSize:        number = 2000,
+  totalSlots:        number = 1,
 ): string {
   if (highValueSnippets.length > 0) {
     const snippet = highValueSnippets[slotIndex % highValueSnippets.length];
@@ -111,12 +112,17 @@ export function pickExcerpt(
       const end   = Math.min(fullText.length, idx + snippet.length + 500);
       return fullText.slice(start, end);
     }
-    // Snippet text not found verbatim in fullText (e.g. teacher pasted it
-    // with slight edits) — fall through to the rotating window below
+    // Snippet text not found verbatim in fullText — fall through to window below
   }
 
-  const maxStart = Math.max(1, fullText.length - windowSize);
-  const start    = (slotIndex * Math.floor(windowSize * 0.35)) % maxStart;
+  if (fullText.length <= windowSize) return fullText;
+
+  // Divide the text into equal segments so each slot sees a different section.
+  // This prevents multiple slots from all hitting the same worked example.
+  const maxStart   = fullText.length - windowSize;
+  const segmentStep = Math.floor(maxStart / Math.max(totalSlots, 1));
+  const step        = Math.max(segmentStep, Math.floor(windowSize * 0.5));
+  const start       = Math.min(slotIndex * step, maxStart);
   return fullText.slice(start, start + windowSize);
 }
 

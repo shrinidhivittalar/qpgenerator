@@ -2,12 +2,14 @@ import Groq from 'groq-sdk';
 import { validateQuestionBlock, assignGlobalIds, QuestionBlock } from '../validation/index.js';
 import { QuestionType } from '../validation/schemaMap.js';
 import { buildPrompt, PromptContext } from './prompts.js';
-import { buildMapSkillPrompt } from './paperGenerator.js';
+import { buildMapSkillPrompt, generateFigureQuestionForSlot } from './paperGenerator.js';
+import type { FigureImage } from './paperGenerator.js';
 import { withRetry, withTimeout } from '../lib/retry.js';
 import { groqAcquire } from '../lib/groqLimiter.js';
 import { allocateSlots, ChapterInput } from './slotAllocator.js';
 import { pickStrategy, Strategy } from './strategyPicker.js';
 import { createLimiter } from '../lib/concurrency.js';
+import { logger } from '../lib/logger.js';
 
 // Lazy singleton — constructed only when realGenerateFn is first called so
 // that importing this module in tests without GROQ_API_KEY does not throw.
@@ -37,7 +39,7 @@ export type GenerateFn = (
 
 export type RunTypeLoopResult =
   | { status: 'success'; questions: object[] }
-  | { status: 'failed'; requested: number; received: number; error: string };
+  | { status: 'failed';  questions: object[]; requested: number; received: number; error: string };
 
 const MAX_ATTEMPTS = 3;
 
@@ -84,6 +86,7 @@ export async function runTypeLoop(
 
   return {
     status:    'failed',
+    questions: recalculateMarks(collected, marksPerQuestion),
     requested: targetCount,
     received:  collected.length,
     error:     collected.length === 0
@@ -182,13 +185,40 @@ export function makeTrackedGenerateFn(): { generateFn: GenerateFn; getTokensUsed
 }
 
 // ── Slot-based generation ─────────────────────────────────────────────────────
-// Slots are grouped into batches of up to SLOT_BATCH_SIZE per API call to
-// reduce the number of Groq requests and stay within the TPM window.
-// Each batch shares the first slot's excerpt, chapter, and difficulty — a
-// deliberate tradeoff: slightly less per-question diversity in exchange for
-// 3-4× fewer API calls and dramatically shorter generation time.
+// Slots are grouped into batches per API call. Batch size trades diversity for
+// speed: larger batches = fewer API calls but more questions sharing one excerpt.
+// Long-answer questions use batch size 1 so every question gets its own unique
+// excerpt — they're most prone to duplicate "same scenario, different wording".
 
-const SLOT_BATCH_SIZE = 3;
+const DEFAULT_BATCH_SIZE = 3;
+const TYPE_BATCH_SIZE: Partial<Record<QuestionType, number>> = {
+  longAnswer:  1,
+  shortAnswer: 2,
+};
+
+// Deduplicate by Jaccard similarity on question text. Keeps the first of any
+// pair exceeding the threshold so ordering is deterministic.
+function deduplicateQuestions(questions: object[], threshold = 0.55): object[] {
+  const getWords = (q: object): Set<string> =>
+    new Set(
+      (((q as any).questionText ?? '') as string)
+        .toLowerCase()
+        .match(/\b[a-z]{4,}\b/g) ?? [],
+    );
+
+  const accepted: object[] = [];
+  for (const q of questions) {
+    const qWords = getWords(q);
+    const isDup  = accepted.some(a => {
+      const aWords = getWords(a);
+      const inter  = [...qWords].filter(w => aWords.has(w)).length;
+      const union  = new Set([...qWords, ...aWords]).size;
+      return union > 0 && inter / union >= threshold;
+    });
+    if (!isDup) accepted.push(q);
+  }
+  return accepted;
+}
 
 export async function generateTypeViaSlots(
   type:               QuestionType,
@@ -202,28 +232,48 @@ export async function generateTypeViaSlots(
   limiter:            ReturnType<typeof createLimiter>,
   typeIndex:          number = 0,
   mapItems?:          string[],
+  figurePages?:       FigureImage[],
 ): Promise<{ questions: object[]; requested: number; received: number }> {
+  // figureBased questions are generated via vision API, not text prompts.
+  // Each slot picks one figure page round-robin from the uploaded chapter pages.
+  if (type === 'figureBased') {
+    logger.info('figureBased_slot_start', { figurePageCount: figurePages?.length ?? 0, count });
+    if (!figurePages || figurePages.length === 0) {
+      logger.warn('figureBased_no_pages', { count });
+      return { questions: [], requested: count, received: 0 };
+    }
+    const questions: object[] = [];
+    for (let i = 0; i < count; i++) {
+      const figure = figurePages[i % figurePages.length];
+      try {
+        const q = await limiter(() =>
+          generateFigureQuestionForSlot(marksPerQuestion, figure.base64, figure.mimeType, teacherId, tone, figure._id),
+        );
+        if (q) questions.push(q);
+      } catch { /* skip failed slot */ }
+    }
+    return { questions, requested: count, received: questions.length };
+  }
+
   const slots = await allocateSlots(type, count, marksPerQuestion, chapters, explicitDifficulty, typeIndex);
 
-  // Group slots into sequential batches to minimise API calls.
-  // Each batch generates SLOT_BATCH_SIZE questions in one Groq call using
-  // the lead slot's excerpt. Slots are pre-shuffled by allocateSlots so
-  // chapter diversity is already encoded in the slot order.
+  // Group slots into batches. Long-answer uses batch size 1 so every question
+  // gets its own unique excerpt and API call — they're most prone to the
+  // "same scenario, different wording" duplication pattern.
+  const batchSize = TYPE_BATCH_SIZE[type] ?? DEFAULT_BATCH_SIZE;
   const batches: typeof slots[] = [];
-  for (let i = 0; i < slots.length; i += SLOT_BATCH_SIZE) {
-    batches.push(slots.slice(i, i + SLOT_BATCH_SIZE));
+  for (let i = 0; i < slots.length; i += batchSize) {
+    batches.push(slots.slice(i, i + batchSize));
   }
 
   const settled = await Promise.allSettled(
     batches.map(batchSlots =>
       limiter(async () => {
-        const lead = batchSlots[0];
+        const lead       = batchSlots[0];
         const batchCount = batchSlots.length;
         const { strategy, baseQuestion } = await pickStrategy(teacherId, lead.chapterId, type);
 
         const slotGenerateFn: GenerateFn = async (_src, _type, n, marks) => {
-          // mapSkill items are teacher-specified — source text is irrelevant and
-          // confuses the model into refusing. Use the dedicated prompt instead.
           const { system, user } = type === 'mapSkill'
             ? buildMapSkillPrompt(marks, mapItems, n)
             : await buildPrompt(type, lead.sourceExcerpt, n, marks, {
@@ -252,11 +302,60 @@ export async function generateTypeViaSlots(
     ),
   );
 
-  const questions: object[] = [];
+  const raw: object[] = [];
   for (const r of settled) {
-    if (r.status === 'fulfilled' && r.value.status === 'success') {
-      questions.push(...r.value.questions);
+    if (r.status === 'fulfilled') {
+      // Include questions from both successful and partial batches.
+      // A failed batch still has whatever valid questions it produced.
+      raw.push(...r.value.questions);
     }
+  }
+
+  // Deduplicate by Jaccard similarity on question text before returning.
+  // Catches cosmetic variants produced when multiple batches hit the same
+  // textbook example (e.g. "50m from minar at 30°" vs "50m from tower at 30°").
+  const questions = deduplicateQuestions(raw);
+
+  // Shortfall pass: some batches may have returned fewer than their allocated
+  // count because a narrow excerpt window ran out of distinct content.
+  // Retry for the remaining gap using the full combined chapter text so the
+  // model has broader context to draw from.
+  if (questions.length < count && type !== 'mapSkill' && chapters.length > 0) {
+    const shortfall    = count - questions.length;
+    const combinedText = chapters
+      .map(c => c.sourceText)
+      .join('\n\n')
+      .slice(0, 8000);
+
+    try {
+      const { strategy, baseQuestion } = await pickStrategy(teacherId, chapters[0].id, type);
+      const retryFn: GenerateFn = async (_src, _type, n, marks) => {
+        const { system, user } = await buildPrompt(type, combinedText, n, marks, {
+          teacherId,
+          bankId,
+          tone,
+          difficulty:  explicitDifficulty,
+          chapterName: chapters[0].name,
+          strategy,
+          baseQuestion,
+          dedupeHint:  'Focus on different topics and scenarios not yet covered. Do not repeat questions already generated.',
+        });
+        const { qs } = await callGroq(type, system, user).then(r => ({ qs: r.questions }));
+        return qs;
+      };
+
+      const retryResult = await limiter(() =>
+        runTypeLoop(combinedText, type, shortfall, marksPerQuestion, retryFn),
+      );
+      if (retryResult.questions.length > 0) {
+        const merged = deduplicateQuestions([...questions, ...retryResult.questions]);
+        return {
+          questions: merged.slice(0, count),
+          requested: count,
+          received:  Math.min(merged.length, count),
+        };
+      }
+    } catch { /* ignore retry failure — return what we already have */ }
   }
 
   return { questions, requested: count, received: questions.length };
@@ -314,6 +413,20 @@ export async function generateSet(
         totalMarks:   result.questions.reduce((sum, q) => sum + ((q as Record<string, unknown>).marks as number), 0),
         status:       'success',
         questions:    result.questions,
+      });
+    } else if (result.received > 0) {
+      // Partial result — accept what was generated rather than discarding it.
+      blocks.push({
+        questionType: type,
+        totalMarks:   result.questions.reduce((sum, q) => sum + ((q as Record<string, unknown>).marks as number), 0),
+        status:       'success',
+        questions:    result.questions,
+      });
+      errors.push({
+        type,
+        requested: result.requested,
+        received:  result.received,
+        error:     result.error,
       });
     } else {
       errors.push({

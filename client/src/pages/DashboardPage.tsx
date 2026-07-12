@@ -321,23 +321,63 @@ function SchemeCard({
 function SidebarChapterRow({
   chapter,
   isDeleting,
+  isScanning,
   onDelete,
+  onScanFigures,
 }: {
   chapter: ChapterInfo;
   isDeleting: boolean;
+  isScanning: boolean;
   onDelete: () => void;
+  onScanFigures: (file: File) => void;
 }) {
+  const scanRef = useRef<HTMLInputElement>(null);
+
   return (
     <div className="flex items-center gap-2.5 px-1 py-2 rounded-card-inner hover:bg-surface-50 group transition-colors">
+      <input
+        ref={scanRef}
+        type="file"
+        accept="application/pdf"
+        className="hidden"
+        onChange={e => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (f) onScanFigures(f);
+        }}
+      />
       <div className="flex-1 min-w-0">
         <p className="text-xs font-medium text-slate-700 truncate leading-tight">
           {chapter.chapterNumber}. {chapter.chapterName}
         </p>
-        <p className="text-2xs text-slate-400">{chapter.subject} · {chapter.weightPercent}%</p>
+        <div className="flex items-center gap-1.5 mt-0.5">
+          <p className="text-2xs text-slate-400">{chapter.subject} · {chapter.weightPercent}%</p>
+          {chapter.figurePageCount > 0 && (
+            <span className="text-2xs text-purple-500 font-medium">{chapter.figurePageCount} fig</span>
+          )}
+        </div>
       </div>
       <button
+        onClick={() => scanRef.current?.click()}
+        disabled={isScanning || isDeleting}
+        title="Scan for figures"
+        className={`shrink-0 transition-colors disabled:opacity-40 ${
+          chapter.figurePageCount === 0
+            ? 'text-purple-400 hover:text-purple-600'
+            : 'text-transparent group-hover:text-purple-300 hover:!text-purple-500'
+        }`}
+        aria-label={`Scan figures in ${chapter.chapterName}`}
+      >
+        {isScanning ? <Spinner className="w-3.5 h-3.5 text-purple-400" /> : (
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        )}
+      </button>
+      <button
         onClick={onDelete}
-        disabled={isDeleting}
+        disabled={isDeleting || isScanning}
         className="shrink-0 text-transparent group-hover:text-slate-300 hover:!text-rose-500 transition-colors disabled:opacity-40"
         title="Delete chapter"
         aria-label={`Delete ${chapter.chapterName}`}
@@ -432,14 +472,14 @@ export default function DashboardPage() {
   const { user, logout } = useAuth();
   const {
     state, setTypeConfig, setIntent, applyScheme,
-    generate, generatePaper, addFigureImages, removeFigureImage,
+    generate, generatePaper,
     editQuestion, regenerateType,
   } = useGeneration();
   const {
     setId, typeConfig, results, isGenerating, isRegenerating, exportError,
     difficultyDefault, tone, bankId, activeSchemeId,
     activePaperStructure, filledPaperStructure, isPaperGenerating,
-    paperGenerateError, paperStats, figureImages,
+    paperGenerateError, paperStats,
   } = state;
 
 
@@ -550,6 +590,7 @@ export default function DashboardPage() {
   const chapterFileRef = useRef<HTMLInputElement>(null);
   const [chapterUploadError, setChapterUploadError] = useState<string | null>(null);
   const [deletingChapterId,  setDeletingChapterId]  = useState<string | null>(null);
+  const [scanningChapterId,  setScanningChapterId]  = useState<string | null>(null);
 
   async function loadChapters() {
     setChaptersLoading(true);
@@ -598,6 +639,21 @@ export default function DashboardPage() {
       setChapterUploadError('Upload failed.');
     } finally {
       setUploadingChapter(false);
+    }
+  }
+
+  async function handleScanFigures(id: string, file: File) {
+    setScanningChapterId(id);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res  = await apiFetch(`/api/chapters/${id}/scan-figures`, { method: 'POST', body: form });
+      const body = await res.json() as { figurePageCount?: number; error?: string };
+      if (res.ok) {
+        setChapters(cs => cs.map(c => c._id === id ? { ...c, figurePageCount: body.figurePageCount ?? 0 } : c));
+      }
+    } catch { /* ignore */ } finally {
+      setScanningChapterId(null);
     }
   }
 
@@ -1201,52 +1257,81 @@ export default function DashboardPage() {
               </SectionStep>
             )}
 
-            {/* Figure upload — shown whenever in paper mode so figures are ready before generation */}
-            {schemeStep === 'done' && isPaperMode && (
-              <div className="rounded-card border border-purple-200 bg-purple-50 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-purple-900">Figure Images</p>
-                    <p className="text-xs text-purple-600 mt-0.5">
-                      Upload one image per Figure Based question slot (PNG or JPG).
-                    </p>
-                  </div>
-                  <label className="cursor-pointer rounded-lg border border-purple-300 bg-white px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-50 transition-colors">
-                    + Add Images
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      multiple
-                      className="hidden"
-                      onChange={e => e.target.files && addFigureImages(e.target.files)}
-                    />
-                  </label>
-                </div>
+            {/* Figure-Based Questions — shown whenever selected chapters have detected figures */}
+            {(() => {
+              const totalFigurePages = chapters
+                .filter(c => selectedChapterIds.has(c._id))
+                .reduce((s, c) => s + (c.figurePageCount ?? 0), 0);
+              if (totalFigurePages === 0) return null;
 
-                {figureImages.length === 0 ? (
-                  <p className="text-xs text-purple-400 italic">No figures added yet.</p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {figureImages.map((fig, i) => (
-                      <div key={i} className="relative group">
-                        <img
-                          src={`data:${fig.mimeType};base64,${fig.base64}`}
-                          alt={fig.filename}
-                          className="h-16 w-16 object-cover rounded border border-purple-200"
-                        />
-                        <button
-                          onClick={() => removeFigureImage(i)}
-                          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-xs hidden group-hover:flex items-center justify-center leading-none"
-                        >
-                          ×
-                        </button>
-                        <p className="text-xs text-purple-500 text-center mt-0.5 truncate w-16">{fig.filename}</p>
-                      </div>
-                    ))}
+              const fbEntry = typeConfig.find(tc => tc.type === 'figureBased');
+              const enabled = Boolean(fbEntry);
+
+              function toggleFigureBased() {
+                if (enabled) {
+                  setTypeConfig(typeConfig.filter(tc => tc.type !== 'figureBased'));
+                } else {
+                  setTypeConfig([...typeConfig, { type: 'figureBased', count: Math.min(totalFigurePages, 3), marksPerQuestion: 2 }]);
+                }
+              }
+              function updateFb(field: 'count' | 'marksPerQuestion', raw: string) {
+                const value = field === 'count'
+                  ? Math.max(1, Math.min(totalFigurePages, Math.floor(Number(raw))))
+                  : Math.max(0.5, Number(raw));
+                setTypeConfig(typeConfig.map(tc => tc.type === 'figureBased' ? { ...tc, [field]: value } : tc));
+              }
+
+              return (
+                <div className={`rounded-card border p-4 transition-colors ${enabled ? 'border-purple-300 bg-purple-50' : 'border-purple-200 bg-white'}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={toggleFigureBased}
+                        disabled={isGenerating}
+                        className="w-4 h-4 rounded accent-purple-600"
+                      />
+                      <span className="font-medium text-sm text-gray-800">Figure Based</span>
+                    </label>
+                    <span className="text-xs text-purple-600 bg-purple-100 rounded-full px-2 py-0.5">
+                      {totalFigurePages} figure page{totalFigurePages !== 1 ? 's' : ''} detected
+                    </span>
                   </div>
-                )}
-              </div>
-            )}
+                  <p className="text-xs text-purple-600 mt-1.5 mb-0">
+                    Questions framed from diagrams found in your uploaded textbook PDFs.
+                  </p>
+                  {enabled && fbEntry && (
+                    <div className="mt-3 flex gap-3">
+                      <label className="flex flex-col gap-1 flex-1">
+                        <span className="text-xs text-gray-500">Count (max {totalFigurePages})</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={totalFigurePages}
+                          value={fbEntry.count}
+                          onChange={e => updateFb('count', e.target.value)}
+                          disabled={isGenerating}
+                          className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 flex-1">
+                        <span className="text-xs text-gray-500">Marks each</span>
+                        <input
+                          type="number"
+                          min={0.5}
+                          step={0.5}
+                          value={fbEntry.marksPerQuestion}
+                          onChange={e => updateFb('marksPerQuestion', e.target.value)}
+                          disabled={isGenerating}
+                          className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Generate button */}
             {schemeStep === 'done' && (
@@ -1621,13 +1706,26 @@ export default function DashboardPage() {
                 </p>
               ) : (
                 <>
+                  {/* Prompt to re-scan existing chapters that predate figure detection */}
+                  {chapters.some(c => c.figurePageCount === 0) && (
+                    <div className="rounded-card-inner bg-purple-50 border border-purple-200 p-2.5 text-2xs text-purple-700 leading-relaxed">
+                      <p className="font-semibold mb-1">Enable Figure Based questions</p>
+                      <p>
+                        Chapters uploaded before figure detection was added need a one-time re-scan.
+                        Click the <span className="font-semibold">image icon</span> next to each chapter and select its PDF.
+                        New uploads are detected automatically.
+                      </p>
+                    </div>
+                  )}
                   <div className="space-y-0.5">
                     {chapters.map(ch => (
                       <SidebarChapterRow
                         key={ch._id}
                         chapter={ch}
                         isDeleting={deletingChapterId === ch._id}
+                        isScanning={scanningChapterId === ch._id}
                         onDelete={() => handleDeleteChapter(ch._id)}
+                        onScanFigures={f => handleScanFigures(ch._id, f)}
                       />
                     ))}
                   </div>

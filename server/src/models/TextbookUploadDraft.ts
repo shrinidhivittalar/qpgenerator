@@ -9,13 +9,22 @@ interface ICandidate {
   detectionMethod: 'bookmark' | 'heuristic' | 'llm';
 }
 
+export interface IFigurePage {
+  pageNum: number;
+  base64:  string;
+  width:   number;
+  height:  number;
+}
+
 export interface ITextbookUploadDraft {
-  teacherId:  Types.ObjectId;
-  subject:    string;
-  fullText:   string;
-  candidates: ICandidate[];
-  createdAt:  Date;
-  updatedAt:  Date;
+  teacherId:   Types.ObjectId;
+  subject:     string;
+  fullText:    string;
+  candidates:  ICandidate[];
+  pageOffsets: number[];   // char offset where each PDF page starts in fullText
+  figurePages: IFigurePage[];
+  createdAt:   Date;
+  updatedAt:   Date;
 }
 
 const CandidateSchema = new Schema<ICandidate>(
@@ -30,15 +39,24 @@ const CandidateSchema = new Schema<ICandidate>(
   { _id: false },
 );
 
-// Short-lived document — Teacher should confirm promptly. Simplest v1 is to
-// delete the draft once confirmed (Stage 1e). A TTL index (e.g. 24 hours) is
-// a reasonable follow-up addition.
+const FigurePageSchema = new Schema<IFigurePage>(
+  {
+    pageNum: { type: Number, required: true },
+    base64:  { type: String, required: true },
+    width:   { type: Number, required: true },
+    height:  { type: Number, required: true },
+  },
+  { _id: false },
+);
+
 const TextbookUploadDraftSchema = new Schema<ITextbookUploadDraft>(
   {
-    teacherId:  { type: Schema.Types.ObjectId, ref: 'User', required: true },
-    subject:    { type: String, required: true },
-    fullText:   { type: String, required: true },
-    candidates: { type: [CandidateSchema], default: [] },
+    teacherId:   { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    subject:     { type: String, required: true },
+    fullText:    { type: String, required: true },
+    candidates:  { type: [CandidateSchema], default: [] },
+    pageOffsets: { type: [Number], default: [] },
+    figurePages: { type: [FigurePageSchema], default: [] },
   },
   { timestamps: true },
 );
