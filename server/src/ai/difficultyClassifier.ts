@@ -8,7 +8,7 @@ function getGroq(): Groq {
   if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   return _groq;
 }
-const CLASSIFIER_MODEL = process.env.GROQ_MODEL ?? 'llama-4-maverick-17b-128e-instruct';
+const CLASSIFIER_MODEL = process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
 
 // type is string (not QuestionType) so future types like 'caseStudy' don't
 // require changes to the enum — this module is classification-only, no schema deps.

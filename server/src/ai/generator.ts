@@ -3,11 +3,13 @@ import { validateQuestionBlock, assignGlobalIds, QuestionBlock } from '../valida
 import { QuestionType } from '../validation/schemaMap.js';
 import { buildPrompt, PromptContext } from './prompts.js';
 import { buildMapSkillPrompt, generateFigureQuestionForSlot } from './paperGenerator.js';
-import type { FigureImage } from './paperGenerator.js';
+import type { FigureImage, FigureStyleHint } from './paperGenerator.js';
+import { getStyleGuide } from './styleExtractor.js';
 import { withRetry, withTimeout } from '../lib/retry.js';
 import { groqAcquire } from '../lib/groqLimiter.js';
 import { allocateSlots, ChapterInput } from './slotAllocator.js';
 import { pickStrategy, Strategy } from './strategyPicker.js';
+import { countExemplarsForType } from './historicalRetrieval.js';
 import { createLimiter } from '../lib/concurrency.js';
 import { logger } from '../lib/logger.js';
 
@@ -18,7 +20,7 @@ function getGroq(): Groq {
   if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   return _groq;
 }
-const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile';
+const GROQ_MODEL = process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
 
 type ToneOption = 'formal-board-exam' | 'neutral' | 'conversational';
 
@@ -233,6 +235,7 @@ export async function generateTypeViaSlots(
   typeIndex:          number = 0,
   mapItems?:          string[],
   figurePages?:       FigureImage[],
+  blueprintContext?:  Partial<PromptContext>,
 ): Promise<{ questions: object[]; requested: number; received: number }> {
   // figureBased questions are generated via vision API, not text prompts.
   // Each slot picks one figure page round-robin from the uploaded chapter pages.
@@ -242,21 +245,39 @@ export async function generateTypeViaSlots(
       logger.warn('figureBased_no_pages', { count });
       return { questions: [], requested: count, received: 0 };
     }
+    // Fetch StyleGuide once for all figure slots — avoids N DB round-trips.
+    const figStyleGuide = bankId
+      ? await getStyleGuide(teacherId, bankId).catch(() => null)
+      : null;
+    const figStyle: FigureStyleHint = {
+      examBoard:  blueprintContext?.examBoard,
+      styleGuide: figStyleGuide,
+    };
+    // Shuffle pages so each generation run uses a different order — avoids
+    // the same figure dominating when count > figurePages.length.
+    const shuffled = [...figurePages].sort(() => Math.random() - 0.5);
     const settled = await Promise.allSettled(
       Array.from({ length: count }, (_, i) => {
-        const figure = figurePages[i % figurePages.length];
+        const figure = shuffled[i % shuffled.length];
         return limiter(() =>
-          generateFigureQuestionForSlot(marksPerQuestion, figure.base64, figure.mimeType, teacherId, tone, figure._id),
+          generateFigureQuestionForSlot(marksPerQuestion, figure.base64, figure.mimeType, teacherId, tone, figure._id, figStyle),
         );
       }),
     );
+    const skipped = settled.filter(r => r.status === 'fulfilled' && r.value === null).length;
     const questions = settled
       .filter((r): r is PromiseFulfilledResult<object> => r.status === 'fulfilled' && r.value !== null)
       .map(r => r.value);
-    return { questions, requested: count, received: questions.length };
+    // Exclude intentionally skipped figures from the requested count so they
+    // don't surface as failures — a non-educational figure is not an error.
+    return { questions, requested: count - skipped, received: questions.length };
   }
 
   const slots = await allocateSlots(type, count, marksPerQuestion, chapters, explicitDifficulty, typeIndex);
+
+  // Count exemplars once per type so pickStrategy can raise its draw
+  // probability when the bank is well stocked (avoids N DB round-trips).
+  const exemplarCount = await countExemplarsForType(teacherId, type).catch(() => 0);
 
   // Group slots into batches. Long-answer uses batch size 1 so every question
   // gets its own unique excerpt and API call — they're most prone to the
@@ -272,12 +293,13 @@ export async function generateTypeViaSlots(
       limiter(async () => {
         const lead       = batchSlots[0];
         const batchCount = batchSlots.length;
-        const { strategy, baseQuestion } = await pickStrategy(teacherId, lead.chapterId, type);
+        const { strategy, baseQuestion } = await pickStrategy(teacherId, lead.chapterId, type, exemplarCount);
 
         const slotGenerateFn: GenerateFn = async (_src, _type, n, marks) => {
           const { system, user } = type === 'mapSkill'
             ? buildMapSkillPrompt(marks, mapItems, n)
             : await buildPrompt(type, lead.sourceExcerpt, n, marks, {
+                ...blueprintContext,   // blueprint fields (lower priority — explicit params below override)
                 teacherId,
                 bankId,
                 tone,
@@ -329,9 +351,10 @@ export async function generateTypeViaSlots(
       .slice(0, 8000);
 
     try {
-      const { strategy, baseQuestion } = await pickStrategy(teacherId, chapters[0].id, type);
+      const { strategy, baseQuestion } = await pickStrategy(teacherId, chapters[0].id, type, exemplarCount);
       const retryFn: GenerateFn = async (_src, _type, n, marks) => {
         const { system, user } = await buildPrompt(type, combinedText, n, marks, {
+          ...blueprintContext,
           teacherId,
           bankId,
           tone,

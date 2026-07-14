@@ -1,5 +1,12 @@
 import { ReferenceExemplar } from '../models/ReferenceExemplar.js';
 
+export async function countExemplarsForType(
+  teacherId: string,
+  type:      string,
+): Promise<number> {
+  return ReferenceExemplar.countDocuments({ teacherId, questionType: type });
+}
+
 export async function getHistoricalCandidate(
   teacherId: string,
   chapterId: string | null,

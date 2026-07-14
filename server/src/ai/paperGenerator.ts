@@ -2,6 +2,8 @@ import Groq from 'groq-sdk';
 import { withRetry, withTimeout } from '../lib/retry.js';
 import { groqAcquire } from '../lib/groqLimiter.js';
 import { buildLongAnswerPrompt } from './prompts.js';
+import { getStyleGuide } from './styleExtractor.js';
+import type { StyleGuide } from './styleExtractor.js';
 import { parseAiJsonArray } from './generator.js';
 import { schemaMap, QuestionType } from '../validation/schemaMap.js';
 import { LongAnswerSchema } from '../validation/schemas/longAnswer.js';
@@ -18,16 +20,45 @@ export interface FigureImage {
   filename?: string;
 }
 
-// Vision calls consume ~2× the tokens of a text call (image input + text).
-const VISION_TOKEN_ESTIMATE = 5_000;
-
 let _groq: Groq | null = null;
 function getGroq(): Groq {
   if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   return _groq;
 }
 
-const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-4-maverick-17b-128e-instruct';
+const GROQ_MODEL = process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
+
+const VISION_MODEL = process.env.OPENROUTER_MODEL ?? 'qwen/qwen2.5-vl-72b-instruct';
+
+async function callVisionModel(system: string, base64: string, mimeType: string, userText: string): Promise<string> {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY ?? ''}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      temperature: 0.7,
+      messages: [
+        { role: 'system', content: system },
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
+            { type: 'text', text: userText },
+          ],
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+  return data.choices[0]?.message?.content ?? '';
+}
 
 // Returns { system, user } for mapSkill — items are teacher-specified so the
 // model must NOT look to the source text for place names; it only writes
@@ -68,7 +99,22 @@ RULES:
   return { system, user };
 }
 
-function buildSlotSystemPrompt(type: QuestionType, marks: number, tone: string): string {
+// Carries board and style context down to every slot-level prompt.
+// Fetched once per generatePaper call and reused across all slots.
+interface SlotStyleContext {
+  styleGuide:          StyleGuide | null;
+  examBoard:           string;
+  bloomsDistribution?: { remember: number; understand: number; apply: number; analyze: number };
+  globalInstructions?: string[];
+  expectedAnswerStyle?:string;
+}
+
+function buildSlotSystemPrompt(
+  type:    QuestionType,
+  marks:   number,
+  tone:    string,
+  style?:  SlotStyleContext,
+): string {
   const toneNote = tone === 'formal-board-exam' ? 'Formal board-exam register.' : 'Clear, plain language.';
   const m = marks;
   const q = `{"hide_text":false,"text":"question text here","read_text":false,"image":""}`;
@@ -99,9 +145,36 @@ Each option MUST be a short, plausible completion or answer — not a placeholde
 CRITICAL: correctAnswer MUST be copied CHARACTER-FOR-CHARACTER from one of the options[i].text values. Do NOT use "A", "B", "C" or a paraphrase — use the exact option text string.`
     : '';
 
+  // Board / style context blocks — appended when a StyleContext is supplied
+  const examBoardLabel = style?.examBoard ? `senior ${style.examBoard}-pattern ` : '';
+
+  let styleLines = '';
+  if (style?.styleGuide) {
+    const sg = style.styleGuide;
+    styleLines += `\nBOARD STYLE: Use command words from this set: ${sg.commandWords.join(', ')}.`;
+    const marksKey = String(marks);
+    if (sg.marksFormat[marksKey])
+      styleLines += ` For ${marks}-mark questions: ${sg.marksFormat[marksKey]}`;
+    if (sg.preferPatterns.length > 0)
+      styleLines += `\nPREFER patterns: ${sg.preferPatterns.slice(0, 3).join(' | ')}`;
+    if (sg.avoidPatterns.length > 0)
+      styleLines += `\nAVOID patterns: ${sg.avoidPatterns.slice(0, 3).join(' | ')}`;
+  }
+  if (style?.bloomsDistribution) {
+    const d = style.bloomsDistribution;
+    const dominant = (Object.entries(d) as [string, number][]).sort((a, b) => b[1] - a[1])[0];
+    styleLines += `\nCOGNITIVE LEVEL: Target ${dominant[0]} level (${dominant[1]}% of questions in this section).`;
+  }
+  if (style?.globalInstructions && style.globalInstructions.length > 0) {
+    styleLines += `\nEXAM INSTRUCTIONS: ${style.globalInstructions.slice(0, 3).join(' | ')}`;
+  }
+  if (style?.expectedAnswerStyle) {
+    styleLines += `\nEXPECTED ANSWER STYLE: ${style.expectedAnswerStyle}`;
+  }
+
   return `[QUESTION_TYPE:${type}]
-You are a question paper setter. Generate exactly 1 ${type} question worth ${m} mark(s) from the source text.
-${toneNote} Ground the question in concepts and examples actually present in the source. Do not invent hospital scenarios.
+You are a ${examBoardLabel}question paper setter. Generate exactly 1 ${type} question worth ${m} mark(s) from the source text.
+${toneNote} Ground the question in concepts and examples actually present in the source. Do not invent hospital scenarios.${styleLines}
 ${mcqStemNote}
 Return ONLY a raw JSON array — no markdown, no extra fields, no commentary. Use this exact schema:
 ${schema}`;
@@ -156,6 +229,13 @@ function pickExcerpt(sourceText: string, offsetIndex: number, windowSize = 2000,
   return sourceText.slice(start, start + windowSize);
 }
 
+// Carries board and style context into figure (vision) prompts.
+// Kept separate from SlotStyleContext so it can be exported to generator.ts.
+export interface FigureStyleHint {
+  examBoard?:  string;
+  styleGuide?: StyleGuide | null;
+}
+
 // Vision-based generation: sends the figure image + instruction to the multimodal model.
 // The LLM returns a FigureBasedSchema-compatible JSON object (without imageBase64/imageMimeType).
 // We inject those fields server-side after the call.
@@ -164,13 +244,15 @@ async function generateFigureQuestion(
   figure:     FigureImage,
   options:    PaperGenerateOptions,
   requestId?: string,
+  style?:     FigureStyleHint,
 ): Promise<object | null> {
   const m       = question.marks;
   const subType = m >= 3 ? 'shortAnswer' : 'mcq';
 
   // Dev mock — set GROQ_MOCK_FIGURE=true in server/.env to skip the real vision
-  // call during development. Returns a realistic LaTeX-bearing fixture so the
-  // full pipeline (validation → storage → rendering → Word export) can be tested
+  // call during development (works regardless of which vision backend is active).
+  // Returns a realistic LaTeX-bearing fixture so the full pipeline
+  // (validation → storage → rendering → Word export) can be tested
   // without consuming any API tokens.
   if (process.env.GROQ_MOCK_FIGURE === 'true') {
     const isMcq = subType === 'mcq';
@@ -201,8 +283,28 @@ async function generateFigureQuestion(
     };
   }
 
+  // Board / style context for the figure prompt
+  const examBoardLabel = style?.examBoard ? `senior ${style.examBoard}-pattern ` : '';
+  let figureStyleLines = '';
+  if (style?.styleGuide) {
+    const sg = style.styleGuide;
+    if (sg.commandWords.length > 0)
+      figureStyleLines += `\nBOARD STYLE: Use command words from this set: ${sg.commandWords.join(', ')}.`;
+    if (sg.preferPatterns.length > 0)
+      figureStyleLines += ` Preferred phrasing patterns: ${sg.preferPatterns.slice(0, 2).join(' | ')}.`;
+    if (subType === 'shortAnswer' && sg.answerStyle)
+      figureStyleLines += `\nANSWER STYLE: ${sg.answerStyle}`;
+  }
+
   const system = `[QUESTION_TYPE:figureBased]
-You are a question paper setter. Analyze the provided figure carefully and generate exactly 1 question worth ${m} mark${m !== 1 ? 's' : ''}.
+You are a ${examBoardLabel}question paper setter. Analyze the provided figure carefully.
+
+FIRST — decide if this figure is suitable for an exam question:
+SKIP if the figure is any of: QR code, barcode, decorative border, ladder/scaffold diagram, page number, watermark, logo, header/footer graphic, purely textual image with no diagram, photograph of a person, or any non-mathematical non-scientific decorative element.
+ACCEPT if the figure contains: geometry (triangles, circles, polygons, angles), graphs (coordinate axes, functions, bar/pie charts, histograms), scientific diagrams (ray diagrams, electric circuits, force diagrams, biology diagrams), number lines, statistical tables with visual layout, or any labeled mathematical/scientific illustration.
+
+If SKIP: return exactly {"skip": true}
+If ACCEPT: generate exactly 1 question worth ${m} mark${m !== 1 ? 's' : ''}.${figureStyleLines}
 
 Return ONLY a raw JSON object — no markdown, no array wrapper, no extra fields:
 {
@@ -224,43 +326,33 @@ Rules:
 ${subType === 'mcq'
   ? '- Exactly 4 options. correctAnswer must be character-for-character identical to one option text.\n- All distractors must be plausible given the figure content.'
   : '- Omit "options" entirely.\n- correctAnswer is exam-quality model answer prose.'}
+- GEOMETRY FIRST: If the figure contains any geometric elements (angles, triangles, circles, polygons, parallel lines, coordinate axes, congruence/similarity marks), ALWAYS base the question on the geometric property — angle calculation, area, perimeter, Pythagoras, similarity ratio, arc length, etc.
+- Base the question ONLY on what is visible in the figure — do not invent unlabeled parts.
+- For math/science: use $...$ for inline LaTeX. Set "useLatex": true if ANY math appears.
 - explanation must state the specific reason, not merely restate the answer.`;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      // Vision calls consume more tokens — reserve a higher estimate.
-      await groqAcquire(VISION_TOKEN_ESTIMATE);
-
-      const response = await withRetry(
+      const raw = await withRetry(
         () => withTimeout(
-          () => getGroq().chat.completions.create({
-            model: GROQ_MODEL,
-            messages: [
-              { role: 'system', content: system },
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'image_url',
-                    image_url: { url: `data:${figure.mimeType};base64,${figure.base64}` },
-                  },
-                  {
-                    type: 'text',
-                    text: `Generate a ${m}-mark ${subType} question about this figure.`,
-                  },
-                ] as any,
-              },
-            ],
-            temperature: 0.7,
-          }),
+          () => callVisionModel(
+            system,
+            figure.base64,
+            figure.mimeType,
+            `Generate a ${m}-mark ${subType} question about this figure.`,
+          ),
           45_000,
           `paperGen:figureBased:q${question.number}`,
         ),
         2,
       );
-
-      const raw    = response.choices[0]?.message?.content ?? '';
       const parsed = parseJsonObject(raw);
+
+      if (parsed && typeof parsed === 'object' && (parsed as Record<string, unknown>).skip === true) {
+        logger.info('paper_gen_figure_skipped', { requestId, questionNumber: question.number, reason: 'non-educational figure' });
+        return null;
+      }
+
       const result = FigureBasedSchema.safeParse(parsed);
 
       if (result.success) {
@@ -299,6 +391,7 @@ async function generateObjectiveQuestion(
   excerpt:     string,
   options:     PaperGenerateOptions,
   requestId?:  string,
+  style?:      SlotStyleContext,
 ): Promise<object | null> {
   const type = question.type as QuestionType;
   const schema = schemaMap[type];
@@ -308,7 +401,7 @@ async function generateObjectiveQuestion(
     try {
       const { system, user } = type === 'mapSkill'
         ? buildMapSkillPrompt(question.marks, question.mapItems)
-        : { system: buildSlotSystemPrompt(type, question.marks, options.tone ?? 'formal-board-exam'), user: `SOURCE TEXT:\n${excerpt}` };
+        : { system: buildSlotSystemPrompt(type, question.marks, options.tone ?? 'formal-board-exam', style), user: `SOURCE TEXT:\n${excerpt}` };
 
       await groqAcquire();
       const response = await withRetry(
@@ -362,16 +455,22 @@ async function generateLongAnswerQuestion(
   excerpt:     string,
   options:     PaperGenerateOptions,
   requestId?:  string,
+  style?:      SlotStyleContext,
 ): Promise<object | null> {
   const subPartCount = question.subPartCount ?? 2;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const { system, user } = buildLongAnswerPrompt(excerpt, {
-        tone:        options.tone,
-        chapterName: chapter.name,
-        marks:       question.marks,
+        tone:                options.tone,
+        chapterName:         chapter.name,
+        marks:               question.marks,
         subPartCount,
+        examBoard:           style?.examBoard,
+        bloomsDistribution:  style?.bloomsDistribution,
+        globalInstructions:  style?.globalInstructions,
+        expectedAnswerStyle: style?.expectedAnswerStyle,
+        styleGuide:          style?.styleGuide,
       });
 
       await groqAcquire();
@@ -420,9 +519,15 @@ async function generateLongAnswerQuestion(
 }
 
 export interface PaperGenerateOptions {
-  teacherId:  string;
-  tone?:      'formal-board-exam' | 'neutral' | 'conversational';
-  requestId?: string;
+  teacherId:           string;
+  tone?:               'formal-board-exam' | 'neutral' | 'conversational';
+  requestId?:          string;
+  // Board / style context (Gap 4 — passed from route via scheme blueprint)
+  examBoard?:          string;
+  bankId?:             string;
+  bloomsDistribution?: { remember: number; understand: number; apply: number; analyze: number };
+  globalInstructions?: string[];
+  expectedAnswerStyle?:string;
 }
 
 // Thin wrapper used by generateTypeViaSlots (non-paper mode) to call the vision
@@ -434,11 +539,12 @@ export async function generateFigureQuestionForSlot(
   teacherId:     string,
   tone?:         PaperGenerateOptions['tone'],
   figurePageId?: string,
+  style?:        FigureStyleHint,
 ): Promise<object | null> {
   const question = { number: 1, type: 'figureBased' as const, marks, generated: null };
   const figure:   FigureImage = { base64, mimeType, ...(figurePageId ? { _id: figurePageId } : {}) };
   const options:  PaperGenerateOptions = { teacherId, tone };
-  return generateFigureQuestion(question, figure, options);
+  return generateFigureQuestion(question, figure, options, undefined, style);
 }
 
 export interface PaperGenerateResult {
@@ -464,6 +570,18 @@ export async function generatePaper(
   figureImages: FigureImage[] = [],
 ): Promise<PaperGenerateResult> {
   if (chapters.length === 0) throw new Error('At least one chapter is required.');
+
+  // Fetch StyleGuide once for the whole paper so every slot gets board patterns.
+  // getStyleGuide returns null when no bankId or no guide exists — slots degrade
+  // gracefully (style blocks are simply omitted from the prompt).
+  const styleGuide = await getStyleGuide(options.teacherId, options.bankId).catch(() => null);
+  const slotStyle: SlotStyleContext = {
+    styleGuide,
+    examBoard:           options.examBoard ?? '',
+    bloomsDistribution:  options.bloomsDistribution,
+    globalInstructions:  options.globalInstructions,
+    expectedAnswerStyle: options.expectedAnswerStyle,
+  };
 
   // Collect all question slots with section-aware offsets.
   // Each section starts at a different region of the source so same-numbered
@@ -507,13 +625,13 @@ export async function generatePaper(
             // No figures uploaded — mark slot as failed
             return { globalIndex, generated: null };
           }
-          generated = await generateFigureQuestion(question, figure, options, options.requestId);
+          generated = await generateFigureQuestion(question, figure, options, options.requestId, slotStyle);
         } else {
           const chapter = pickChapter(question, chapters, globalIndex);
           const excerpt = pickExcerpt(chapter.sourceText, excerptIndex, 1500, slots.length);
           generated = question.type === 'longAnswer'
-            ? await generateLongAnswerQuestion(question, chapter, excerpt, options, options.requestId)
-            : await generateObjectiveQuestion(question, chapter, excerpt, options, options.requestId);
+            ? await generateLongAnswerQuestion(question, chapter, excerpt, options, options.requestId, slotStyle)
+            : await generateObjectiveQuestion(question, chapter, excerpt, options, options.requestId, slotStyle);
         }
 
         return { globalIndex, generated };

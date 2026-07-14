@@ -87,7 +87,7 @@ export async function inferPaperStructure(rawText: string): Promise<PaperStructu
   const response = await withRetry(
     () => withTimeout(
       () => getGroq().chat.completions.create({
-        model:    process.env.GROQ_MODEL ?? 'llama-4-maverick-17b-128e-instruct',
+        model:    process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct',
         messages: [
           { role: 'system', content: PAPER_STRUCTURE_PROMPT },
           { role: 'user',   content: `DOCUMENT TEXT:\n${rawText.slice(0, 40000)}` },

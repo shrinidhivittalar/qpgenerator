@@ -9,6 +9,7 @@ import {
   buildFallbackBlueprint,
 } from '../validation/schemas/examBlueprint.js';
 import { TypeConfigZodSchema } from '../validation/schemas/typeConfig.js';
+import { schemaMap } from '../validation/schemaMap.js';
 
 export interface BlueprintMetadata {
   name?:     string;
@@ -17,20 +18,31 @@ export interface BlueprintMetadata {
   examType?: string;
 }
 
-const SUPPORTED_TYPES = [
-  'fillInBlanks',
-  'multipleChoice',
-  'multiSelect',
-  'matchTheFollowing',
-  'reordering',
-  'sorting',
-  'trueFalse',
-  'assertionReason',
-  'shortAnswer',
-  'longAnswer',
-  'mapSkill',
-  'figureBased',
-] as const;
+const SUPPORTED_TYPES = Object.keys(schemaMap) as string[];
+
+// Maps LLM-invented type names to the nearest supported type.
+// Add entries here as new hallucinations are discovered.
+const TYPE_ALIASES: Record<string, string> = {
+  caseStudy:       'longAnswer',
+  case_study:      'longAnswer',
+  caseBased:       'longAnswer',
+  openEnded:       'longAnswer',
+  essay:           'longAnswer',
+  descriptive:     'longAnswer',
+  shortNote:       'shortAnswer',
+  oneWord:         'fillInBlanks',
+  objective:       'multipleChoice',
+  diagram:         'figureBased',
+  mapBased:        'mapSkill',
+};
+
+function remapType(t: string): string {
+  if (SUPPORTED_TYPES.includes(t)) return t;
+  return TYPE_ALIASES[t] ?? TYPE_ALIASES[
+    // try camelCase → lower conversion match
+    Object.keys(TYPE_ALIASES).find(k => k.toLowerCase() === t.toLowerCase()) ?? ''
+  ] ?? 'shortAnswer';
+}
 
 const BLUEPRINT_PROMPT = `You are an experienced academic paper-setter and assessment blueprint analyst.
 
@@ -127,6 +139,18 @@ function parseJsonObject(raw: string): unknown {
 }
 
 function normalizeBlueprint(raw: unknown, metadata: BlueprintMetadata, rawText: string): ExamBlueprint {
+  // Remap unknown questionType values before Zod validation so hallucinated
+  // types like 'caseStudy' never reach the generation route.
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.sections)) {
+      obj.sections = (obj.sections as Record<string, unknown>[]).map(s => ({
+        ...s,
+        questionType: typeof s.questionType === 'string' ? remapType(s.questionType) : s.questionType,
+      }));
+    }
+  }
+
   const objectResult = ExamBlueprintSchema.safeParse(raw);
   if (objectResult.success) {
     return objectResult.data;
@@ -162,7 +186,7 @@ export async function inferExamBlueprint(
   const response = await withRetry(
     () => withTimeout(
       () => getGroq().chat.completions.create({
-        model: process.env.GROQ_MODEL ?? 'llama-4-maverick-17b-128e-instruct',
+        model: process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct',
         messages: [
           { role: 'system', content: BLUEPRINT_PROMPT },
           { role: 'user', content: `${metadataText}\n\nDOCUMENT TEXT:\n${rawText.slice(0, 40000)}` },

@@ -15,11 +15,11 @@ afterEach(() => {
 
 // ── Spec test 1 ───────────────────────────────────────────────────────────────
 
-describe('70% fresh path', () => {
+describe('low-bank fresh path (exemplarCount < 5)', () => {
   it('Math.random >= 0.30 → fresh immediately, getHistoricalCandidate never called', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.9);
 
-    const result = await pickStrategy('t1', 'c1', 'multipleChoice');
+    const result = await pickStrategy('t1', 'c1', 'multipleChoice', 2);
 
     expect(result).toEqual({ strategy: 'fresh', baseQuestion: null });
     expect(getHistoricalCandidate).not.toHaveBeenCalled();
@@ -36,7 +36,7 @@ describe('age 0 (this year) → rephrase', () => {
       sourceYear: THIS_YEAR,
     });
 
-    const result = await pickStrategy('t1', 'c1', 'fillInBlanks');
+    const result = await pickStrategy('t1', 'c1', 'fillInBlanks', 2);
 
     expect(result.strategy).toBe('rephrase');
     expect(result.baseQuestion).toBe('What is photosynthesis?');
@@ -61,7 +61,7 @@ describe('age 4 years → rephrase or variant only', () => {
 
     const strategies = new Set<string>();
     for (let i = 0; i < 4; i++) {
-      const { strategy } = await pickStrategy('t1', 'c1', 'multipleChoice');
+      const { strategy } = await pickStrategy('t1', 'c1', 'multipleChoice', 2);
       strategies.add(strategy);
       expect(strategy).not.toBe('reuse');
       expect(strategy).not.toBe('fresh');
@@ -89,7 +89,7 @@ describe('age 8 years → all 3 strategies reachable', () => {
 
     const strategies = new Set<string>();
     for (let i = 0; i < 100; i++) {
-      const { strategy } = await pickStrategy('t1', 'c1', 'trueFalse');
+      const { strategy } = await pickStrategy('t1', 'c1', 'trueFalse', 2);
       strategies.add(strategy);
     }
 
@@ -110,7 +110,7 @@ describe('sourceYear = null → treated as age 0 → rephrase only', () => {
     });
 
     for (let i = 0; i < 10; i++) {
-      const { strategy } = await pickStrategy('t1', null, 'fillInBlanks');
+      const { strategy } = await pickStrategy('t1', null, 'fillInBlanks', 2);
       expect(strategy).toBe('rephrase');
     }
   });
@@ -123,8 +123,44 @@ describe('no bank coverage → clean fresh fallback', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.1); // trigger history draw
     vi.mocked(getHistoricalCandidate).mockResolvedValue(null);
 
-    const result = await pickStrategy('t1', 'c1', 'trueFalse');
+    const result = await pickStrategy('t1', 'c1', 'trueFalse', 2);
 
     expect(result).toEqual({ strategy: 'fresh', baseQuestion: null });
+  });
+});
+
+// ── Spec test 7 ───────────────────────────────────────────────────────────────
+
+describe('high-draw path (exemplarCount >= 5)', () => {
+  it('random value between 0.30 and 0.55 → fresh when low-bank, draw when high-bank', async () => {
+    vi.mocked(getHistoricalCandidate).mockResolvedValue({
+      rawText: 'Explain the water cycle.',
+      sourceYear: THIS_YEAR - 3,
+    });
+
+    // 0.40 is >= 0.30 (low threshold) but < 0.55 (high threshold).
+    // low-bank (exemplarCount=2) → fresh; high-bank (exemplarCount=10) → draw from history.
+    vi.spyOn(Math, 'random').mockReturnValue(0.40);
+
+    const lowBank  = await pickStrategy('t1', 'c1', 'shortAnswer', 2);
+    const highBank = await pickStrategy('t1', 'c1', 'shortAnswer', 10);
+
+    expect(lowBank.strategy).toBe('fresh');
+    expect(highBank.strategy).not.toBe('fresh');
+    expect(highBank.baseQuestion).toBe('Explain the water cycle.');
+  });
+});
+
+// ── Spec test 8 ───────────────────────────────────────────────────────────────
+
+describe('default exemplarCount = 0 → low-draw behaviour preserved', () => {
+  it('omitting exemplarCount uses 0 → same as low-bank path', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.40); // between low and high threshold
+
+    // No exemplarCount argument — should behave identically to exemplarCount=0 (low-bank).
+    const result = await pickStrategy('t1', 'c1', 'multipleChoice');
+
+    expect(result.strategy).toBe('fresh');
+    expect(getHistoricalCandidate).not.toHaveBeenCalled();
   });
 });

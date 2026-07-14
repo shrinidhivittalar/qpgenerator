@@ -1,20 +1,28 @@
 import { QuestionType } from '../validation/schemaMap.js';
 import { getHistoricalCandidate } from './historicalRetrieval.js';
 
-// Probability that a given slot draws from the historical bank rather than
-// generating fresh. Kept as a named constant so it can be made per-subject
-// or per-exam-type in a later phase without hunting for magic numbers.
-const HISTORICAL_DRAW_PROBABILITY = 0.30;
+// Draw probabilities for historical bank vs. fresh generation.
+// Low path applies when the bank has fewer than MIN_EXEMPLARS_FOR_HIGH_DRAW
+// questions of the requested type — not enough signal to trust heavily.
+// High path applies once the bank is well stocked; named constants so the
+// thresholds are visible and adjustable without a code hunt.
+const MIN_EXEMPLARS_FOR_HIGH_DRAW      = 5;
+const HISTORICAL_DRAW_PROBABILITY_LOW  = 0.30;
+const HISTORICAL_DRAW_PROBABILITY_HIGH = 0.55;
 
 export type Strategy = 'fresh' | 'rephrase' | 'variant' | 'reuse';
 
 export async function pickStrategy(
-  teacherId: string,
-  chapterId: string | null,
-  type:      QuestionType,
+  teacherId:     string,
+  chapterId:     string | null,
+  type:          QuestionType,
+  exemplarCount: number = 0,
 ): Promise<{ strategy: Strategy; baseQuestion: string | null }> {
-  // 70% path — no DB query at all
-  if (Math.random() >= HISTORICAL_DRAW_PROBABILITY) {
+  const prob = exemplarCount >= MIN_EXEMPLARS_FOR_HIGH_DRAW
+    ? HISTORICAL_DRAW_PROBABILITY_HIGH
+    : HISTORICAL_DRAW_PROBABILITY_LOW;
+
+  if (Math.random() >= prob) {
     return { strategy: 'fresh', baseQuestion: null };
   }
 

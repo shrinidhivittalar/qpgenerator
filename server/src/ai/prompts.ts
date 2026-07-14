@@ -2,6 +2,8 @@ import { QuestionType } from '../validation/schemaMap.js';
 import type { PaperQuestion } from '../types/paperStructure.js';
 import { DIFFICULTY_INSTRUCTIONS } from './difficulty.js';
 import { getExemplars } from './exemplarRetrieval.js';
+import { getStyleGuide } from './styleExtractor.js';
+import type { StyleGuide } from './styleExtractor.js';
 import { Strategy } from './strategyPicker.js';
 
 // ── Context consumed by buildPrompt ──────────────────────────────────────────
@@ -24,6 +26,9 @@ export interface PromptContext {
   inferenceRatio?:     number;       // percentage 0–30
   // Chapter context
   chapterName?:        string;
+  // Blueprint-derived fields (Gap 2 — threaded from scheme's examBlueprint)
+  globalInstructions?: string[];     // board-level exam instructions (e.g. "all parts compulsory")
+  expectedAnswerStyle?:string;       // e.g. "bullet points", "prose paragraphs", "numbered steps"
   // Repair/regen strategy — for per-slot (count=1) paths only
   strategy?:           Strategy;
   baseQuestion?:       string | null;
@@ -526,26 +531,31 @@ export async function buildPrompt(
   context:          PromptContext = {},
 ): Promise<{ system: string; user: string }> {
   const {
-    examBoard          = 'CBSE',
-    institutionType    = 'school',
-    difficulty         = 'moderate',
-    tone               = 'formal-board-exam',
-    teacherId          = '',
+    examBoard           = 'CBSE',
+    institutionType     = 'school',
+    difficulty          = 'moderate',
+    tone                = 'formal-board-exam',
+    teacherId           = '',
     bankId,
     subjectHint,
-    highValueSnippets  = [],
-    referenceQuestions = [],
+    highValueSnippets   = [],
+    referenceQuestions  = [],
     bloomsDistribution,
-    inferenceRatio     = 20,
+    inferenceRatio      = 20,
     chapterName,
+    globalInstructions  = [],
+    expectedAnswerStyle,
     strategy,
-    baseQuestion       = null,
+    baseQuestion        = null,
     dedupeHint,
     mapItems,
   } = context;
 
-  // Exemplars for style guidance (async DB call — skipped when teacherId absent)
-  const exemplars = await getExemplars(teacherId, type, { bankId, subjectHint });
+  // Both DB calls run in parallel — skipped when teacherId absent
+  const [exemplars, styleGuide] = await Promise.all([
+    getExemplars(teacherId, type, { bankId, subjectHint }),
+    getStyleGuide(teacherId, bankId),
+  ]);
 
   // Legacy dedupeHint (retry loop) merged into referenceQuestions when empty
   const refQs = referenceQuestions.length === 0 && dedupeHint
@@ -572,6 +582,26 @@ export async function buildPrompt(
   const difficultyBlock = `\nDIFFICULTY GUIDANCE: ${DIFFICULTY_INSTRUCTIONS[difficulty]}`;
   const toneBlock       = `\nTONE: ${TONE_INSTRUCTION[tone]}`;
 
+  const globalInstructionsBlock = globalInstructions.length > 0
+    ? `\n\nEXAM-LEVEL INSTRUCTIONS (official board/institution requirements — follow exactly):\n` +
+      globalInstructions.map((inst, i) => `${i + 1}. ${inst}`).join('\n')
+    : '';
+
+  const expectedAnswerStyleBlock = expectedAnswerStyle
+    ? `\n\nEXPECTED ANSWER STYLE: ${expectedAnswerStyle}`
+    : '';
+
+  const styleGuideBlock = styleGuide
+    ? `\n\nBOARD STYLE GUIDE — your output must match these patterns exactly:\n` +
+      `Exam: ${styleGuide.examBoard} | Subject: ${styleGuide.subject}\n` +
+      `Command words used: ${styleGuide.commandWords.join(', ')}\n` +
+      `Tone: ${styleGuide.toneDescriptor}\n` +
+      `Prefer: ${styleGuide.preferPatterns.join(' | ')}\n` +
+      `Avoid: ${styleGuide.avoidPatterns.join(' | ')}\n` +
+      `Cognitive level: ${styleGuide.bloomsSummary}\n` +
+      `Answer style: ${styleGuide.answerStyle}`
+    : '';
+
   const exemplarBlock = exemplars.length > 0
     ? `\n\nSTYLE EXEMPLARS — match register, precision, and framing:\n${exemplars.map((e, i) => `${i + 1}. ${e}`).join('\n')}`
     : '';
@@ -582,7 +612,7 @@ export async function buildPrompt(
 
   // Machine-readable type marker on line 1 — used by test mocks to route
   // the correct question fixture per type without parsing prose content.
-  const system = `[QUESTION_TYPE:${type}]\n` + preamble + difficultyBlock + toneBlock + exemplarBlock + strategyBlock;
+  const system = `[QUESTION_TYPE:${type}]\n` + preamble + difficultyBlock + toneBlock + globalInstructionsBlock + expectedAnswerStyleBlock + styleGuideBlock + exemplarBlock + strategyBlock;
 
   // ── Assemble user message ─────────────────────────────────────────────────
   const chapterPrefix = chapterName
@@ -603,13 +633,19 @@ export async function buildPrompt(
 // Returns a single JSON object, not an array. Used by paperGenerator.ts.
 
 export interface LongAnswerPromptContext {
-  tone?:        'formal-board-exam' | 'neutral' | 'conversational';
-  chapterName?: string;
-  marks:        number;
-  subPartCount: number;
+  tone?:               'formal-board-exam' | 'neutral' | 'conversational';
+  chapterName?:        string;
+  marks:               number;
+  subPartCount:        number;
+  // Board / style context (Gap 4 — paper mode style awareness)
+  examBoard?:          string;
+  bloomsDistribution?: { remember: number; understand: number; apply: number; analyze: number };
+  globalInstructions?: string[];
+  expectedAnswerStyle?:string;
+  styleGuide?:         StyleGuide | null;
 }
 
-const LONG_ANSWER_SYSTEM = `You are a senior question paper setter.
+const LONG_ANSWER_SYSTEM = `You are a senior {{examBoard}}question paper setter.
 
 Generate a long-answer question based on the provided source text.
 The question consists of a preamble (scenario/case) and sub-part questions.
@@ -639,7 +675,7 @@ Sub-part marks MUST sum to exactly {{totalMarks}}. Distribute as: {{partMarkDist
 - "modelAnswer" length: ~20-30 words per mark for that sub-part.
 - "explanation": A teacher-facing note, not a student answer — explain \
 why these sub-parts test the key learning outcomes of the source.
-- TONE: {{tone}}`;
+- TONE: {{tone}}{{styleBlock}}`;
 
 export function buildLongAnswerPrompt(
   sourceText: string,
@@ -654,11 +690,37 @@ export function buildLongAnswerPrompt(
     `${String.fromCharCode(97 + i)}) ${base + (i < rem ? 1 : 0)} mark${base + (i < rem ? 1 : 0) !== 1 ? 's' : ''}`,
   ).join(', ');
 
+  // Board / style context blocks
+  const examBoardPrefix = ctx.examBoard ? `${ctx.examBoard}-pattern ` : '';
+
+  let styleBlock = '';
+  if (ctx.bloomsDistribution) {
+    const d = ctx.bloomsDistribution;
+    styleBlock += `\nBLOOM'S DISTRIBUTION: remember ${d.remember}%, understand ${d.understand}%, apply ${d.apply}%, analyze ${d.analyze}%. Sub-parts should reflect this spread.`;
+  }
+  if (ctx.globalInstructions && ctx.globalInstructions.length > 0) {
+    styleBlock += `\nEXAM INSTRUCTIONS: ${ctx.globalInstructions.join(' | ')}`;
+  }
+  if (ctx.expectedAnswerStyle) {
+    styleBlock += `\nEXPECTED ANSWER STYLE: ${ctx.expectedAnswerStyle}`;
+  }
+  if (ctx.styleGuide) {
+    const sg = ctx.styleGuide;
+    styleBlock += `\nBOARD STYLE: Use command words from this set: ${sg.commandWords.join(', ')}.`;
+    if (sg.preferPatterns.length > 0)
+      styleBlock += ` Prefer: ${sg.preferPatterns.slice(0, 3).join(' | ')}.`;
+    if (sg.avoidPatterns.length > 0)
+      styleBlock += ` Avoid: ${sg.avoidPatterns.slice(0, 3).join(' | ')}.`;
+    styleBlock += `\nANSWER STYLE: ${sg.answerStyle}`;
+  }
+
   const system = `[QUESTION_TYPE:longAnswer]\n` + renderTemplate(LONG_ANSWER_SYSTEM, {
+    examBoard:       examBoardPrefix,
     subPartCount:    String(ctx.subPartCount),
     totalMarks:      String(ctx.marks),
     partMarkDistrib: distrib,
     tone,
+    styleBlock,
   });
 
   const chapterPrefix = ctx.chapterName

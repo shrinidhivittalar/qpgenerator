@@ -92,9 +92,12 @@ MONGODB_URI=mongodb+srv://<user>:<password>@cluster.mongodb.net/qpgenerator
 JWT_ACCESS_SECRET=<random-string-min-32-chars>
 JWT_REFRESH_SECRET=<random-string-min-32-chars>
 
-# Groq
+# Groq (text-only generation)
 GROQ_API_KEY=<your-groq-api-key>
 GROQ_MODEL=llama-4-maverick-17b-128e-instruct
+
+# Gemini (figureBased vision generation — gemini-2.0-flash)
+GEMINI_API_KEY=<your-gemini-api-key>
 
 # CORS
 CLIENT_URL=http://localhost:5173

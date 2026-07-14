@@ -22,14 +22,26 @@ import { logger } from '../lib/logger.js';
 import { DifficultyLevel, ToneOption } from '../validation/schemas/typeConfig.js';
 import type { ChapterInput } from '../ai/slotAllocator.js';
 import { PaperStructureSchema } from '../types/paperStructure.js';
+import { ExamBlueprintSchema } from '../validation/schemas/examBlueprint.js';
+import type { PromptContext } from '../ai/prompts.js';
 
 const router = Router();
 
-const VALID_TYPES = [
-  'fillInBlanks', 'multipleChoice', 'multiSelect', 'matchTheFollowing',
-  'reordering', 'sorting', 'trueFalse', 'assertionReason', 'shortAnswer', 'longAnswer', 'mapSkill',
-  'figureBased',
-] as const;
+const VALID_TYPES = Object.keys(schemaMap) as string[];
+
+const TYPE_ALIASES: Record<string, string> = {
+  caseStudy:   'longAnswer',
+  case_study:  'longAnswer',
+  caseBased:   'longAnswer',
+  openEnded:   'longAnswer',
+  essay:       'longAnswer',
+  descriptive: 'longAnswer',
+  shortNote:   'shortAnswer',
+  oneWord:     'fillInBlanks',
+  objective:   'multipleChoice',
+  diagram:     'figureBased',
+  mapBased:    'mapSkill',
+};
 
 const TypeConfigItemSchema = z.object({
   type:             z.string(),
@@ -184,15 +196,53 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
     return;
   }
 
+  // Remap legacy / LLM-hallucinated type names to nearest valid type before validation.
   for (const tc of bodyResult.data.typeConfig) {
-    if (!(VALID_TYPES as readonly string[]).includes(tc.type)) {
-      res.status(400).json({ error: `Invalid question type: ${tc.type}` });
-      return;
+    if (!(VALID_TYPES as string[]).includes(tc.type)) {
+      tc.type = TYPE_ALIASES[tc.type] ?? 'shortAnswer';
     }
   }
 
-  const { difficultyDefault, tone: toneRaw, bankId, chapterIds } = bodyResult.data;
+  const { difficultyDefault, tone: toneRaw, bankId, chapterIds, schemeId } = bodyResult.data;
   const tone = toneRaw ?? undefined;
+
+  // Resolve scheme blueprint BEFORE generation so its fields reach buildPrompt().
+  // schemeBlueprintContext carries board-level fields valid for all types.
+  // typeBlueprint carries per-type Bloom's distribution and answer style.
+  let schemeBlueprintContext: Partial<PromptContext> = {};
+  const typeBlueprint = new Map<string, {
+    bloomsDistribution:  { remember: number; understand: number; apply: number; analyze: number };
+    expectedAnswerStyle: string;
+  }>();
+  let blueprintTone: 'formal-board-exam' | 'neutral' | 'conversational' | undefined;
+
+  if (schemeId) {
+    const scheme = await Scheme.findById(schemeId).lean();
+    if (scheme && scheme.teacherId.toString() === userId) {
+      set.schemeId = scheme._id as any;
+      const bpResult = ExamBlueprintSchema.safeParse((scheme as any).examBlueprint);
+      if (bpResult.success) {
+        const bp = bpResult.data;
+        blueprintTone = bp.tone;
+        schemeBlueprintContext = {
+          examBoard:          bp.examBoard !== 'inferred' ? bp.examBoard : undefined,
+          institutionType:    bp.institutionType !== 'inferred' ? bp.institutionType : undefined,
+          globalInstructions: bp.globalInstructions.length > 0 ? bp.globalInstructions : undefined,
+        };
+        for (const section of bp.sections) {
+          if (!typeBlueprint.has(section.questionType)) {
+            typeBlueprint.set(section.questionType, {
+              bloomsDistribution:  section.bloomsDistribution,
+              expectedAnswerStyle: section.expectedAnswerStyle,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Request tone wins; fall back to blueprint-inferred tone; then hard default.
+  const effectiveTone = tone ?? blueprintTone ?? 'formal-board-exam';
 
   // Leave difficulty undefined when neither per-type nor global default is set —
   // the difficulty filter in validateQuestionBlock only runs when explicitly requested.
@@ -256,8 +306,9 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
           generateTypeViaSlots(
             tc.type, tc.count, tc.marksPerQuestion, resolvedChapters,
             tc.difficulty ?? undefined,
-            userId, tone ?? 'formal-board-exam', bankId ?? undefined, limiter,
+            userId, effectiveTone, bankId ?? undefined, limiter,
             typeIndex, (tc as any).mapItems, resolvedFigurePages,
+            { ...schemeBlueprintContext, ...(typeBlueprint.get(tc.type) ?? {}) },
           ).then(r => ({ type: tc.type, marksPerQuestion: tc.marksPerQuestion, ...r })),
         ),
       );
@@ -295,7 +346,11 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
       const { generateFn, getTokensUsed } = makeTrackedGenerateFn();
       const sourceForGeneration = diverseExcerpt(set.sourceText, activeTypeConfig.length);
       const result = await generateSet(sourceForGeneration, activeTypeConfig, generateFn, {
-        tone, bankId, teacherId: userId, subjectHint: set.department,
+        ...schemeBlueprintContext,
+        tone: effectiveTone,
+        bankId,
+        teacherId: userId,
+        subjectHint: set.department,
       });
       blocks     = result.blocks;
       errors     = result.errors;
@@ -307,16 +362,9 @@ router.post('/:id/generate', requireRole('teacher'), async (req: Request, res: R
 
   const durationMs = Date.now() - startTime;
 
-  const { schemeId } = bodyResult.data;
-  if (schemeId) {
-    try {
-      const scheme = await Scheme.findById(schemeId).lean();
-      if (scheme && scheme.teacherId.toString() === userId) set.schemeId = scheme._id as any;
-    } catch { /* ignore */ }
-  }
-
+  // set.schemeId was already assigned during blueprint resolution above (if schemeId present).
   if (difficultyDefault)            set.difficultyDefault = difficultyDefault as any;
-  if (tone)                         set.tone              = tone as any;
+  if (effectiveTone)                set.tone              = effectiveTone as any;
   if (bankId)                       set.bankId            = bankId as any;
   if (resolvedChapters.length > 0)  set.chapterIds        = resolvedChapters.map(c => c.id) as any;
 
@@ -439,9 +487,10 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
 
   const { type } = bodyResult.data;
 
-  if (!(VALID_TYPES as readonly string[]).includes(type)) {
-    res.status(400).json({ error: `Invalid question type: ${type}` }); return;
-  }
+  const resolvedType = (VALID_TYPES as string[]).includes(type)
+    ? type
+    : (TYPE_ALIASES[type] ?? 'shortAnswer');
+  if (resolvedType !== type) bodyResult.data.type = resolvedType;
 
   const set = await QuestionSet.findById(req.params.id);
   if (!set) { res.status(404).json({ error: 'Question set not found.' }); return; }
@@ -481,6 +530,29 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
     }));
   }
 
+  // Resolve blueprint context from stored scheme (if any) for regeneration.
+  let regenBlueprintContext: Partial<PromptContext> = {};
+  const storedSchemeId = (set.schemeId as any)?.toString();
+  if (storedSchemeId) {
+    const scheme = await Scheme.findById(storedSchemeId).lean();
+    if (scheme) {
+      const bpResult = ExamBlueprintSchema.safeParse((scheme as any).examBlueprint);
+      if (bpResult.success) {
+        const bp = bpResult.data;
+        regenBlueprintContext = {
+          examBoard:          bp.examBoard !== 'inferred' ? bp.examBoard : undefined,
+          institutionType:    bp.institutionType !== 'inferred' ? bp.institutionType : undefined,
+          globalInstructions: bp.globalInstructions.length > 0 ? bp.globalInstructions : undefined,
+        };
+        const section = bp.sections.find(s => s.questionType === type);
+        if (section) {
+          regenBlueprintContext.bloomsDistribution  = section.bloomsDistribution;
+          regenBlueprintContext.expectedAnswerStyle  = section.expectedAnswerStyle || undefined;
+        }
+      }
+    }
+  }
+
   const tc: TypeConfig = {
     type:             type as QuestionType,
     count:            storedConfig.count,
@@ -502,6 +574,7 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
         tc.difficulty ?? undefined,
         userId, ((set.tone as string) ?? 'formal-board-exam') as 'formal-board-exam' | 'neutral' | 'conversational', (set.bankId as string) ?? undefined, limiter,
         0, undefined, regenFigurePages,
+        regenBlueprintContext,
       );
       if (slotResult.received >= slotResult.requested) {
         newResult = { status: 'success', questions: slotResult.questions.slice(0, slotResult.requested) };
@@ -519,6 +592,7 @@ router.post('/:id/regenerate', requireRole('teacher'), async (req: Request, res:
       const loopResult = await runTypeLoop(
         sourceForRegen, tc.type, tc.count, tc.marksPerQuestion, generateFn,
         {
+          ...regenBlueprintContext,
           tone:        (set.tone as 'formal-board-exam' | 'neutral' | 'conversational' | undefined) ?? undefined,
           bankId:      (set.bankId as string | undefined)  ?? undefined,
           teacherId:   userId,
@@ -643,6 +717,27 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
   const hasBudget = await checkAndReserveBudget(userId);
   if (!hasBudget) { res.status(429).json({ error: 'Daily token budget exceeded.' }); return; }
 
+  // Resolve blueprint context from the set's stored scheme (if any).
+  let paperBlueprintOptions: Partial<import('../ai/paperGenerator.js').PaperGenerateOptions> = {};
+  const storedPaperSchemeId = (set.schemeId as any)?.toString();
+  const storedPaperBankId   = (set.bankId   as any)?.toString();
+  if (storedPaperSchemeId) {
+    const scheme = await Scheme.findById(storedPaperSchemeId).lean();
+    if (scheme) {
+      const bpResult = ExamBlueprintSchema.safeParse((scheme as any).examBlueprint);
+      if (bpResult.success) {
+        const bp = bpResult.data;
+        paperBlueprintOptions = {
+          examBoard:          bp.examBoard !== 'inferred' ? bp.examBoard : undefined,
+          globalInstructions: bp.globalInstructions.length > 0 ? bp.globalInstructions : undefined,
+          // Use the first section's Bloom's/answer style as a paper-level default.
+          bloomsDistribution:  bp.sections[0]?.bloomsDistribution,
+          expectedAnswerStyle: bp.sections[0]?.expectedAnswerStyle || undefined,
+        };
+      }
+    }
+  }
+
   const startTime = Date.now();
 
   let result;
@@ -650,7 +745,13 @@ router.post('/:id/generate-paper', requireRole('teacher'), async (req: Request, 
     result = await generatePaper(
       structureResult.data,
       resolvedChapters,
-      { teacherId: userId, tone: tone ?? 'formal-board-exam', requestId: (req as any).requestId },
+      {
+        teacherId:  userId,
+        tone:       tone ?? 'formal-board-exam',
+        requestId:  (req as any).requestId,
+        bankId:     storedPaperBankId,
+        ...paperBlueprintOptions,
+      },
       allFigureImages,
     );
   } catch {

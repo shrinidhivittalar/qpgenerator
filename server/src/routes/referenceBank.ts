@@ -4,8 +4,13 @@ import { z } from 'zod';
 
 import { extractText } from '../ai/extractor.js';
 import { parsePaperIntoQuestions } from '../ai/paperParser.js';
+import { runBankStyleExtraction, saveStyleGuide } from '../ai/styleExtractor.js';
 import { ReferenceExemplar } from '../models/ReferenceExemplar.js';
+import { schemaMap } from '../validation/schemaMap.js';
 import { logger } from '../lib/logger.js';
+
+const BANK_EXCLUDED = new Set<string>(['figureBased', 'mapSkill']);
+const BANK_TYPES = Object.keys(schemaMap).filter(t => !BANK_EXCLUDED.has(t));
 
 const router = Router();
 
@@ -34,10 +39,10 @@ const UploadBodySchema = z.object({
   subject:      z.string().optional(),
   sourceYear:   z.coerce.number().int().min(1900).max(2100).optional(),
   chapterId:    z.string().optional(),
-  questionType: z.enum([
-    'fillInBlanks', 'multipleChoice', 'multiSelect', 'matchTheFollowing',
-    'reordering', 'sorting', 'trueFalse',
-  ]).optional(),
+  questionType: z.string().refine(
+    v => BANK_TYPES.includes(v),
+    { message: `Must be one of: ${BANK_TYPES.join(', ')}` },
+  ).optional(),
 });
 
 // ── GET /api/reference-bank ───────────────────────────────────────────────────
@@ -90,6 +95,7 @@ router.post('/upload', async (req: Request, res: Response) => {
 
   const parsed = UploadBodySchema.safeParse(req.body);
   if (!parsed.success) {
+    logger.warn('reference_bank_upload_body_invalid', { issues: parsed.error.issues });
     res.status(422).json({ error: parsed.error.issues });
     return;
   }
@@ -99,18 +105,24 @@ router.post('/upload', async (req: Request, res: Response) => {
   let sourceText: string;
   try {
     sourceText = await extractText(req.file.buffer);
-  } catch {
+  } catch (err) {
+    logger.warn('reference_bank_extract_failed', { error: String(err) });
     res.status(422).json({ error: 'Could not extract text from this PDF. Try a text-based PDF.' });
     return;
   }
 
+  logger.info('reference_bank_text_extracted', { bytes: sourceText.length });
+
   let questions;
   try {
     questions = await parsePaperIntoQuestions(sourceText);
-  } catch {
+  } catch (err) {
+    logger.warn('reference_bank_parse_failed', { error: String(err) });
     res.status(422).json({ error: 'Could not parse questions from the uploaded paper.' });
     return;
   }
+
+  logger.info('reference_bank_parsed', { total: questions.length, types: [...new Set(questions.map(q => q.questionType))] });
 
   // Filter by questionType if the teacher specified one
   if (questionType) {
@@ -118,6 +130,7 @@ router.post('/upload', async (req: Request, res: Response) => {
   }
 
   if (questions.length === 0) {
+    logger.warn('reference_bank_no_questions', { afterFilter: questionType ?? 'none' });
     res.status(422).json({ error: 'No recognisable questions found in the uploaded paper.' });
     return;
   }
@@ -134,6 +147,25 @@ router.post('/upload', async (req: Request, res: Response) => {
   await ReferenceExemplar.insertMany(
     questions.map(q => ({ ...sharedMeta, questionType: q.questionType, rawText: q.rawText })),
   );
+
+  // Fire-and-forget: (re)build style guide from all exemplars in this bank.
+  // When the bank has questions from multiple years, runBankStyleExtraction
+  // does per-year extraction then synthesises a cross-year consensus guide.
+  // Runs after response is sent so it never slows down the upload.
+  if (bankId) {
+    ReferenceExemplar.find({ teacherId: req.userId, bankId }).lean().then(async (allDocs) => {
+      const guide = await runBankStyleExtraction(
+        allDocs.map(d => ({
+          questionType: d.questionType as string,
+          rawText:      d.rawText      as string,
+          sourceYear:   d.sourceYear   as number | null,
+        })),
+      );
+      if (guide) await saveStyleGuide(req.userId!, bankId, guide, allDocs.length);
+    }).catch((err) => {
+      logger.warn('style_guide_extraction_failed', { bankId, error: String(err) });
+    });
+  }
 
   logger.info('reference_bank_uploaded', {
     requestId:      req.requestId,

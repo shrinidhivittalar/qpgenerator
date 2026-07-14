@@ -8,7 +8,7 @@ function getGroq(): Groq {
   return _groq;
 }
 
-const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-4-maverick-17b-128e-instruct';
+const GROQ_MODEL = process.env.GROQ_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
 
 const CHUNK_SIZE = 12_000;
 const OVERLAP    = 1_500;
