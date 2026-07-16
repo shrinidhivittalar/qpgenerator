@@ -14,12 +14,7 @@ import { requireAuth } from './middleware/auth.js';
 import { requireRole } from './middleware/requireRole.js';
 import healthRouter from './routes/health.js';
 import authRouter from './routes/auth.js';
-import sourceRouter from './routes/source.js';
-import setsRouter from './routes/sets.js';
-import schemesRouter from './routes/schemes.js';
 import referenceBankRouter from './routes/referenceBank.js';
-import textbooksRouter from './routes/textbooks.js';
-import chaptersRouter from './routes/chapters.js';
 
 const app = express();
 
@@ -45,12 +40,7 @@ app.use((req, _res, next) => {
 
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
-app.use('/api/source',         requireAuth, requireRole('teacher'), sourceRouter);
-app.use('/api/sets',           apiLimiter, requireAuth, setsRouter);
-app.use('/api/schemes',        apiLimiter, schemesRouter);
 app.use('/api/reference-bank', apiLimiter, requireAuth, requireRole('teacher'), referenceBankRouter);
-app.use('/api/textbooks',      apiLimiter, textbooksRouter);
-app.use('/api/chapters',       apiLimiter, chaptersRouter);
 
 // Catch-all error handler — logs in tests, prevents bare "Internal Server Error" HTML
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

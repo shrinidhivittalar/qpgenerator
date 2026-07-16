@@ -1,6 +1,15 @@
 import Groq from 'groq-sdk';
 import { withRetry, withTimeout } from '../lib/retry.js';
-import { parseAiJsonArray } from './generator.js';
+
+function parseAiJsonArray(raw: string): unknown[] {
+  const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
