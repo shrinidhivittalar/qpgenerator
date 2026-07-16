@@ -163,6 +163,32 @@ router.get('/questions', async (req: Request, res: Response) => {
   res.json({ questions, total, page: p, pages: Math.ceil(total / l) });
 });
 
+// ── GET /api/reference-bank/uploads ──────────────────────────────────────────
+
+router.get('/uploads', async (req: Request, res: Response) => {
+  const uploads = await ReferenceExemplar.aggregate([
+    { $match: { teacherId: req.userId } },
+    { $group: {
+      _id:       '$uploadId',
+      total:     { $sum: 1 },
+      accepted:  { $sum: { $cond: [{ $eq: ['$status', 'accepted'] }, 1, 0] } },
+      subject:   { $first: '$subject' },
+      class:     { $first: '$class' },
+      createdAt: { $min: '$createdAt' },
+    }},
+    { $sort: { createdAt: -1 } },
+  ]);
+  res.json(uploads.map(u => ({ uploadId: u._id, total: u.total, accepted: u.accepted, subject: u.subject, class: u.class, createdAt: u.createdAt })));
+});
+
+// ── DELETE /api/reference-bank/uploads/:uploadId ─────────────────────────────
+
+router.delete('/uploads/:uploadId', async (req: Request, res: Response) => {
+  const result = await ReferenceExemplar.deleteMany({ teacherId: req.userId, uploadId: req.params.uploadId });
+  if (result.deletedCount === 0) { res.status(404).json({ error: 'Upload not found.' }); return; }
+  res.json({ deleted: result.deletedCount });
+});
+
 // ── GET /api/reference-bank/uploads/:uploadId/review ─────────────────────────
 
 router.get('/uploads/:uploadId/review', async (req: Request, res: Response) => {

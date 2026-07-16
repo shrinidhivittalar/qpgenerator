@@ -69,6 +69,12 @@ export const bankApi = {
   bulkAccept: async (uploadId: string): Promise<{ accepted: number }> =>
     api.post('/api/reference-bank/questions/bulk-accept', { uploadId }).then(r => r.json()),
 
+  uploads: async () =>
+    api.get('/api/reference-bank/uploads').then(r => r.json()),
+
+  deleteUpload: async (uploadId: string): Promise<{ deleted: number }> =>
+    api.delete(`/api/reference-bank/uploads/${uploadId}`).then(r => r.json()),
+
   questions: async (params: Record<string, string | number>) => {
     const q = new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v !== '' && v != null).map(([k, v]) => [k, String(v)])),
