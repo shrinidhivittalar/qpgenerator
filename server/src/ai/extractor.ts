@@ -1,21 +1,26 @@
-// Import from lib/ directly to bypass pdf-parse's index.js debug self-test
-// (index.js reads a test PDF file when !module.parent, which breaks in vitest).
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import mammoth from 'mammoth';
+import Tesseract from 'tesseract.js';
 
-export async function extractText(buffer: Buffer): Promise<string> {
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png']);
+
+// ponytail: scanned PDF → OCR deferred; only images get OCR. Add pdf2pic+ghostscript when PDF→OCR is needed.
+export async function extractText(buffer: Buffer, mimetype = 'application/pdf'): Promise<string> {
+  if (IMAGE_TYPES.has(mimetype)) {
+    const { data: { text } } = await Tesseract.recognize(buffer, 'eng');
+    const t = text.trim();
+    if (t.length === 0) throw new Error('EXTRACTION_FAILED');
+    return t;
+  }
+
   let result: { text: string };
   try {
     result = await pdfParse(buffer);
-  } catch (err) {
-    console.error('[extractor] pdf-parse threw:', (err as Error).message);
+  } catch {
     throw new Error('EXTRACTION_FAILED');
   }
   const text = result.text.trim();
-  if (text.length === 0) {
-    console.error('[extractor] no text extracted — likely a scanned/image PDF');
-    throw new Error('EXTRACTION_FAILED');
-  }
+  if (text.length < 100) throw new Error('SCANNED_PDF');
   return text;
 }
 
@@ -29,17 +34,4 @@ export async function extractDocxText(buffer: Buffer): Promise<string> {
   const text = result.value.trim();
   if (text.length === 0) throw new Error('EXTRACTION_FAILED');
   return text;
-}
-
-export async function extractSchemeText(
-  buffer: Buffer,
-  mimeType: string,
-): Promise<{ text: string; fileType: 'pdf' | 'docx' }> {
-  if (mimeType === 'application/pdf') {
-    return { text: await extractText(buffer), fileType: 'pdf' };
-  }
-  if (mimeType.includes('officedocument.wordprocessingml')) {
-    return { text: await extractDocxText(buffer), fileType: 'docx' };
-  }
-  throw new Error('UNSUPPORTED_TYPE');
 }

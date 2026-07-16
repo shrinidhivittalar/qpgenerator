@@ -19,7 +19,7 @@ function getGroq(): Groq {
 
 const VALID_TYPES = [
   'fillInBlanks', 'multipleChoice', 'multiSelect', 'matchTheFollowing',
-  'reordering', 'sorting', 'trueFalse',
+  'reordering', 'sorting', 'trueFalse', 'shortAnswer', 'longAnswer',
 ] as const;
 
 type ValidType = typeof VALID_TYPES[number];
@@ -27,13 +27,17 @@ type ValidType = typeof VALID_TYPES[number];
 export interface ParsedQuestion {
   questionType: ValidType;
   rawText:      string;
+  marks:        number | null;
+  confidence:   number;
 }
 
 const PAPER_PARSE_PROMPT = `You parse exam question papers into individual questions.
 
-For each distinct question found, output exactly one JSON object:
-  "questionType": one of: fillInBlanks | multipleChoice | multiSelect | matchTheFollowing | reordering | sorting | trueFalse
-  "rawText": the complete question text (for MCQ and multiSelect include all option labels and text verbatim)
+For each distinct question found, output exactly one JSON object with these fields:
+  "questionType": one of: fillInBlanks | multipleChoice | multiSelect | matchTheFollowing | reordering | sorting | trueFalse | shortAnswer | longAnswer
+  "rawText": the complete question text (for MCQ include all option labels and text verbatim)
+  "marks": number of marks for this question (integer), or null if not determinable. Look for inline cues like "[1 Mark]", "(2 marks)", "1 mark each", section headers like "Section A — 1 mark each".
+  "confidence": float 0.0–1.0 — how confident you are this is a complete, well-formed, standalone question. Low confidence if: truncated, garbled text, clearly a heading/instruction, OCR artifacts present.
 
 TYPE MAPPING:
   multipleChoice   → single-answer MCQ with options (A)(B)(C)(D)
@@ -43,8 +47,10 @@ TYPE MAPPING:
   matchTheFollowing → match column A to column B
   reordering       → arrange / sequence steps in order
   sorting          → classify / categorise items into groups
+  shortAnswer      → answer in 2–3 sentences or a few lines
+  longAnswer       → answer in a paragraph or more
 
-EXCLUDE: section headings, instructions, total marks lines, page numbers, sub-headings that are not questions.
+EXCLUDE: section headings, general instructions, total marks lines, page numbers, sub-headings that are not questions.
 
 Return ONLY a raw JSON array. No markdown fences, no commentary.`;
 
@@ -72,6 +78,11 @@ export async function parsePaperIntoQuestions(text: string): Promise<ParsedQuest
     (item): item is ParsedQuestion =>
       VALID_TYPES.includes(item?.questionType) &&
       typeof item?.rawText === 'string' &&
-      item.rawText.trim().length > 0,
-  );
+      item.rawText.trim().length > 0 &&
+      typeof item?.confidence === 'number',
+  ).map(item => ({
+    ...item,
+    marks:      typeof item.marks === 'number' ? item.marks : null,
+    confidence: Math.min(1, Math.max(0, item.confidence)),
+  }));
 }
