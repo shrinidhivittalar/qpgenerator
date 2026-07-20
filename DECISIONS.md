@@ -7,6 +7,39 @@ Teacher-validated prototype — single-page UI confirmed as the right approach.
 
 ---
 
+## Raw Conversation — Teacher Interview (2026-07-19)
+
+### What the teacher said (exact points as told):
+
+> "if we are planning to upload textbook n all for ai generation then it becomes a real issue"
+>
+> 1. there is something like chapter wise weightage like there is certain rules which say a teacher can give only X marks from Y lesson (like 4 marks from chapter 1 and 2 marks from chapter 2)
+> 2. they release 3 model papers every year in such a way that you cannot form a new model paper in different way with the same blueprint
+> 3. apparently the boards are releasing question banks and the questions are being asked only from the question bank (just for analogy if i have the right set of answers for that question bank almost textbook is a waste of time types not exactly but an analogy)
+> 4. there are questions behind the lessons of each chapter and from there also its asked
+> 5. so basically what i got to know is that we can use this application like an assistant like 95% can be done by this and 5 to 10% can be manually done by teachers themselves
+> 6. now if i see this as a developer parsing textbooks is a waste of time and energy because previous 5 year's papers model papers and a question bank per subject is all you need is what i feel, there was a question asked "what if there is no questions itself" i feel its impossible for an institution to not have questions only and even if they don't then we can get questions from the internet because the boards which sets the question papers shall give some questions right?
+
+### Other things confirmed in the same conversation:
+
+- Teacher liked the prototype
+- Paper setting takes 3 to 3.5 hours manually
+- Single page UI is good and easy — no need for separate pages
+- Blueprint is NOT fixed every year — board releases it as a PDF when required (not on a set schedule)
+- We DO have access to the official board question banks
+- The "what if there are no questions" scenario was raised by a colleague — not a real concern, was confirmed as basically impossible
+
+### My response / what I took away:
+
+> "This is gold. Let me reflect back what I'm hearing because this reshapes the entire product."
+>
+> - AI generation from textbooks = wrong direction, scrapped
+> - Real product: previous years papers + model papers + official question bank → blueprint-aware selection
+> - The "generate new questions" AI feature becomes a much smaller edge case — only needed when the pool runs dry, which she herself said is basically impossible
+> - The pipeline is mostly already built — remaining work is connecting the right data to the right constraints
+
+---
+
 ## Key Decisions (from teacher interview + team discussion — 2026-07-19)
 
 ### 1. AI Question Generation from Textbooks — SCRAPPED
@@ -61,8 +94,13 @@ Teacher-validated prototype — single-page UI confirmed as the right approach.
 
 ## What Comes Next (Pending team + boss sign-off)
 
-### Next Immediate Step
-- Get sample blueprint PDF from board
+### Immediate Pending (before anything else)
+- [ ] Run `py scripts/latexify_questions.py --subject science --source qp` — science QP questions (Q01–Q38) still need LaTeX conversion. Textbook questions are intentionally skipped for now.
+- [ ] Get sample blueprint PDF from board (expected 2026-07-20)
+- [ ] Team + boss sign-off on product direction
+- [ ] Commit DECISIONS.md once direction is confirmed
+
+### Next Immediate Step (after sign-off)
 - Parse official board question bank PDF and load into DB (same pipeline, add chapter tagging)
 
 ### Module 2 — Blueprint-Aware Generation
