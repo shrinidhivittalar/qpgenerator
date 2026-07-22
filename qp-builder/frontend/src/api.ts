@@ -102,6 +102,44 @@ export async function renameUpload(id: string, name: string): Promise<void> {
   if (!res.ok) throw new Error('Rename failed')
 }
 
+export interface BlueprintRow {
+  chapter:  string
+  marks_1:  number
+  marks_2:  number
+  marks_3:  number
+  marks_4:  number
+  marks_5:  number
+}
+
+export interface ParsedBlueprint {
+  rows:            BlueprintRow[]
+  total_questions: number
+  total_marks:     number
+}
+
+export async function classifyQuestions(
+  questions: { qid: string; text: string }[],
+  chapters:  string[],
+): Promise<Record<string, string>> {
+  const res  = await fetch('/api/classify-questions', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ questions, chapters }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'Classification failed')
+  return data.classifications as Record<string, string>
+}
+
+export async function parseBlueprint(file: File): Promise<ParsedBlueprint> {
+  const form = new FormData()
+  form.append('file', file)
+  const res  = await fetch('/api/parse-blueprint', { method: 'POST', body: form })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'Blueprint parse failed')
+  return data as ParsedBlueprint
+}
+
 export function imageUrl(subject: string, source: string, filename: string): string {
   const base = import.meta.env.VITE_SUPABASE_IMAGES_URL
   if (base) return `${base}/${subject}/${source}/${filename}`

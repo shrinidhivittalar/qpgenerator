@@ -7,15 +7,21 @@ type SortBy = 'number' | 'type'
 
 const TYPE_SORT_ORDER: Record<string, number> = {
   mcq: 0, text: 1, figure_based: 2, table_based: 3, multi_part: 4,
+  analogy: 5, grammar: 6, comprehension: 7, essay: 8, letter: 9,
 }
 
-const QP_TYPES: QuestionType[]       = ['mcq', 'text', 'figure_based', 'table_based', 'multi_part']
-const TEXTBOOK_TYPES: QuestionType[] = ['mcq', 'text']
-const UPLOADED_TYPES: QuestionType[] = ['mcq', 'text', 'figure_based']
+// All known types in display order — used to build the type filter dynamically
+const ALL_TYPES: QuestionType[] = [
+  'mcq', 'text', 'figure_based', 'table_based', 'multi_part',
+  'analogy', 'grammar', 'comprehension', 'essay', 'letter',
+]
 
 const STATIC_SOURCE_LABELS: Record<string, string> = {
-  qp:       'Question Paper',
-  textbook: 'Textbook',
+  qp:               'Question Paper',
+  textbook:         'Textbook',
+  yashassu_science: 'Yashassu Science',
+  yashassu_maths:   'Yashassu Maths',
+  yashassu_english: 'Yashassu English',
 }
 
 interface Props {
@@ -63,6 +69,7 @@ export function QuestionBank({
   const renameInputRef  = useRef<HTMLInputElement>(null)
   const [paperType, setPaperType] = useState('sslc_qp')
 
+
   // ── Inline rename for currently-viewed upload ─────────────────────────
   const [renamingUpload, setRenamingUpload] = useState(false)
   const [renameDraft,    setRenameDraft]    = useState('')
@@ -91,6 +98,7 @@ export function QuestionBank({
   const sources    = Object.keys(subjectMap[subject] ?? {})
   const isTextbook = source === 'textbook'
   const isUploaded = subject === 'uploaded'
+  const hasChapters = allQuestions.some(q => q.chapter_num != null)
 
   // ── Sort ──────────────────────────────────────────────────────────────
   const [sortBy, setSortBy] = useState<SortBy>('number')
@@ -101,7 +109,7 @@ export function QuestionBank({
   useEffect(() => { setChapterFilter('all') }, [source, subject])
 
   const chapters = useMemo(() => {
-    if (!isTextbook) return []
+    if (!hasChapters) return []
     const seen = new Map<string, number>()
     for (const q of allQuestions) {
       if (q.chapter && q.chapter_num != null && !seen.has(q.chapter)) {
@@ -109,12 +117,12 @@ export function QuestionBank({
       }
     }
     return [...seen.entries()].sort((a, b) => a[1] - b[1]).map(([ch]) => ch)
-  }, [allQuestions, isTextbook])
+  }, [allQuestions, hasChapters])
 
   const filteredQuestions = useMemo(() => {
-    if (!isTextbook || chapterFilter === 'all') return questions
+    if (!hasChapters || chapterFilter === 'all') return questions
     return questions.filter(q => q.chapter === chapterFilter)
-  }, [questions, chapterFilter, isTextbook])
+  }, [questions, chapterFilter, hasChapters])
 
   const visibleQuestions = useMemo(() => {
     if (sortBy === 'type') {
@@ -125,10 +133,15 @@ export function QuestionBank({
     return [...filteredQuestions].sort((a, b) => a.number - b.number)
   }, [filteredQuestions, sortBy])
 
-  const allowedTypes = isUploaded ? UPLOADED_TYPES : isTextbook ? TEXTBOOK_TYPES : QP_TYPES
-  const typeCounts   = Object.fromEntries(
+  // Build type filter list dynamically from what's actually in the bank
+  const allowedTypes = useMemo(() => {
+    const inBank = new Set(allQuestions.map(q => q.type))
+    return ALL_TYPES.filter(t => inBank.has(t))
+  }, [allQuestions])
+
+  const typeCounts = useMemo(() => Object.fromEntries(
     allowedTypes.map(t => [t, allQuestions.filter(q => q.type === t).length])
-  )
+  ), [allQuestions, allowedTypes])
 
   const isLocked = !!lockedSubject && lockedSubject !== subject
 
@@ -325,8 +338,8 @@ export function QuestionBank({
         </div>
       )}
 
-      {/* ── Chapter filter (textbook only) ──────────────────────────────── */}
-      {isTextbook && chapters.length > 0 && (
+      {/* ── Chapter filter ───────────────────────────────────────────────── */}
+      {hasChapters && chapters.length > 0 && (
         <div className="px-3 pt-3 pb-1 shrink-0">
           <div className="flex items-center gap-2">
             <label className="text-xs font-semibold text-gray-500 whitespace-nowrap">Chapter:</label>

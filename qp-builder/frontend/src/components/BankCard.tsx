@@ -110,8 +110,6 @@ export function BankCard({
           ? 'border-indigo-300 bg-indigo-50'
           : locked
           ? 'border-gray-200 bg-gray-50 opacity-60'
-          : simLevel === 'high'
-          ? 'border-orange-200 bg-orange-50'
           : 'border-gray-200 bg-white hover:border-gray-300'
         }`}
     >
@@ -129,6 +127,21 @@ export function BankCard({
             {q.section === 'in_text' && (
               <span className="px-2 py-0.5 rounded-full text-xs bg-sky-50 text-sky-600 border border-sky-200">
                 in-text
+              </span>
+            )}
+            {q.marks != null && (
+              <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 font-semibold">
+                {q.marks}m
+              </span>
+            )}
+            {q.difficulty && (
+              <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                q.difficulty === 'Easy'     ? 'bg-green-50 text-green-600' :
+                q.difficulty === 'Average'  ? 'bg-yellow-50 text-yellow-600' :
+                q.difficulty === 'Difficult'? 'bg-red-50 text-red-600' :
+                'bg-gray-50 text-gray-500'
+              }`}>
+                {q.difficulty}
               </span>
             )}
             {q.has_figure && (
@@ -162,31 +175,6 @@ export function BankCard({
               </div>
             )}
           </div>
-
-          {/* Similarity warnings */}
-          {simLevel && !added && (
-            <div className={`flex items-center gap-1 text-xs rounded-md px-2 py-1 mb-1.5
-              ${simLevel === 'high'
-                ? 'bg-orange-100 text-orange-700'
-                : 'bg-yellow-50 text-yellow-700'
-              }`}
-            >
-              <span>{simLevel === 'high' ? '⚠' : '~'}</span>
-              <span>
-                {simLevel === 'high' ? 'Very similar to' : 'Somewhat similar to'} a question already in your paper
-                ({Math.round(paperSimilarity * 100)}% match)
-              </span>
-            </div>
-          )}
-          {crossSimilarity && !added && (
-            <div className="flex items-center gap-1 text-xs rounded-md px-2 py-1 mb-1.5 bg-blue-50 text-blue-700">
-              <span>~</span>
-              <span>
-                Similar to a {srcLabel(crossSimilarity.src)} question already in your paper
-                ({Math.round(crossSimilarity.sim * 100)}% match)
-              </span>
-            </div>
-          )}
 
           {/* Question text */}
           <p className={`text-gray-700 leading-snug ${expanded ? '' : 'line-clamp-3'}`}>
@@ -234,28 +222,37 @@ export function BankCard({
           {/* Tables */}
           {q.tables.length > 0 && (
             <div className="mt-2 space-y-1">
-              {q.tables.map(tbl => (
-                <div key={tbl.tid} className="overflow-x-auto rounded border border-gray-200">
-                  <table className="text-xs min-w-full">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        {tbl.headers.map((h, i) => (
-                          <th key={i} className="px-2 py-1 text-left font-medium text-gray-600 border-b border-gray-200">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tbl.rows.map((row, ri) => (
-                        <tr key={ri} className={ri % 2 === 0 ? '' : 'bg-gray-50'}>
-                          {tbl.headers.map((h, ci) => (
-                            <td key={ci} className="px-2 py-1 text-gray-700 border-b border-gray-100 last:border-0">
-                              {row[h] ?? ''}
-                            </td>
+              {q.tables.map((tbl, idx) => (
+                <div key={tbl.tid}>
+                  {idx > 0 && (
+                    <div className="flex items-center gap-2 my-1.5">
+                      <div className="flex-1 border-t border-gray-200" />
+                      <span className="text-xs font-semibold text-gray-400 px-1">OR</span>
+                      <div className="flex-1 border-t border-gray-200" />
+                    </div>
+                  )}
+                  <div className="overflow-x-auto rounded border border-gray-200">
+                    <table className="text-xs min-w-full">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {tbl.headers.map((h, i) => (
+                            <th key={i} className="px-2 py-1 text-left font-medium text-gray-600 border-b border-gray-200">{h}</th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {tbl.rows.map((row, ri) => (
+                          <tr key={ri} className={ri % 2 === 0 ? '' : 'bg-gray-50'}>
+                            {tbl.headers.map((h, ci) => (
+                              <td key={ci} className="px-2 py-1 text-gray-700 border-b border-gray-100 last:border-0">
+                                {row[h] ?? ''}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ))}
             </div>

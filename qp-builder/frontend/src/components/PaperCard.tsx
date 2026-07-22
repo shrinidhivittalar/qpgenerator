@@ -2,24 +2,27 @@ import { useState } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { TYPE_LABELS, TYPE_COLORS } from '../types'
-import type { PaperItem } from '../types'
+import type { PaperItem, PaperSection } from '../types'
 import { imageUrl } from '../api'
 import { cleanText } from '../utils'
 import { MathText } from './MathText'
 
 interface Props {
-  item:           PaperItem
-  index:          number
-  rephrasing:     string | null
-  onRemove:       (uid: string) => void
-  onRephrase:     (uid: string) => void
-  onUndoRephrase: (uid: string) => void
-  onMarksChange:  (uid: string, marks: number) => void
-  onTextChange:   (uid: string, text: string) => void
+  item:            PaperItem
+  index:           number
+  rephrasing:      string | null
+  sections:        PaperSection[]
+  onMoveToSection: (uid: string, sectionId: string | null) => void
+  onRemove:        (uid: string) => void
+  onRephrase:      (uid: string) => void
+  onUndoRephrase:  (uid: string) => void
+  onMarksChange:   (uid: string, marks: number) => void
+  onTextChange:    (uid: string, text: string) => void
 }
 
 export function PaperCard({
-  item, index, rephrasing, onRemove, onRephrase, onUndoRephrase, onMarksChange, onTextChange,
+  item, index, rephrasing, sections, onMoveToSection,
+  onRemove, onRephrase, onUndoRephrase, onMarksChange, onTextChange,
 }: Props) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: item.uid })
@@ -125,6 +128,20 @@ export function PaperCard({
             </p>
           )}
 
+          {/* MCQ options — hidden after rephrase because new options are in the rephrased text */}
+          {!isEditing && !item.isRephrased && item.type === 'mcq' && item.options && item.options.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5 pl-0.5">
+              {item.options.map((opt, i) => (
+                <li key={i} className="flex items-baseline gap-1 text-xs text-gray-700">
+                  <span className="shrink-0 font-medium text-gray-500">
+                    {String.fromCharCode(65 + i)}.
+                  </span>
+                  <MathText text={opt} />
+                </li>
+              ))}
+            </ul>
+          )}
+
           {/* Images */}
           {!isEditing && item.images.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-2">
@@ -142,30 +159,39 @@ export function PaperCard({
           {/* Tables */}
           {!isEditing && item.tables.length > 0 && (
             <div className="mt-2 space-y-1">
-              {item.tables.map(tbl => (
-                <div key={tbl.tid} className="overflow-x-auto rounded border border-gray-200">
-                  <table className="text-xs min-w-full">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        {tbl.headers.map((h, i) => (
-                          <th key={i} className="px-2 py-1 text-left font-medium text-gray-600 border-b border-gray-200">
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tbl.rows.map((row, ri) => (
-                        <tr key={ri} className={ri % 2 === 0 ? '' : 'bg-gray-50'}>
-                          {tbl.headers.map((h, ci) => (
-                            <td key={ci} className="px-2 py-1 text-gray-700 border-b border-gray-100">
-                              {row[h] ?? ''}
-                            </td>
+              {item.tables.map((tbl, idx) => (
+                <div key={tbl.tid}>
+                  {idx > 0 && (
+                    <div className="flex items-center gap-2 my-1.5">
+                      <div className="flex-1 border-t border-gray-200" />
+                      <span className="text-xs font-semibold text-gray-400 px-1">OR</span>
+                      <div className="flex-1 border-t border-gray-200" />
+                    </div>
+                  )}
+                  <div className="overflow-x-auto rounded border border-gray-200">
+                    <table className="text-xs min-w-full">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          {tbl.headers.map((h, i) => (
+                            <th key={i} className="px-2 py-1 text-left font-medium text-gray-600 border-b border-gray-200">
+                              {h}
+                            </th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {tbl.rows.map((row, ri) => (
+                          <tr key={ri} className={ri % 2 === 0 ? '' : 'bg-gray-50'}>
+                            {tbl.headers.map((h, ci) => (
+                              <td key={ci} className="px-2 py-1 text-gray-700 border-b border-gray-100">
+                                {row[h] ?? ''}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ))}
             </div>
@@ -174,6 +200,22 @@ export function PaperCard({
           {/* Actions row */}
           {!isEditing && (
             <div className="flex items-center gap-2 mt-2.5 flex-wrap">
+              {/* Section move */}
+              {sections.length > 0 && (
+                <select
+                  value={item.sectionId ?? ''}
+                  onChange={e => onMoveToSection(item.uid, e.target.value || null)}
+                  className="text-xs border border-gray-200 rounded px-1.5 py-0.5 text-gray-500
+                             focus:outline-none focus:ring-1 focus:ring-indigo-400 bg-white"
+                  title="Move to section"
+                >
+                  <option value="">No section</option>
+                  {sections.map(s => (
+                    <option key={s.id} value={s.id}>{s.title}</option>
+                  ))}
+                </select>
+              )}
+
               {/* Marks */}
               <label className="flex items-center gap-1 text-xs text-gray-500">
                 Marks:

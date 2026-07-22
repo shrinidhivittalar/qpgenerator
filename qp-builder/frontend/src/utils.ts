@@ -1,5 +1,8 @@
 export const mkUid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
+export const escHtml = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
 // Strips leading original number and collapses split MCQ options ("(A) \ntext" -> "(A) text")
 export function cleanText(text: string): string {
   return text
@@ -39,3 +42,4 @@ export function jaccardSimilarity(a: string, b: string): number {
   const union = new Set([...setA, ...setB]).size
   return intersection / union
 }
+

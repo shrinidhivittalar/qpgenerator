@@ -1,23 +1,32 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { fetchSubjects, fetchQuestions, fetchUploads, rephraseQuestion, uploadPaper, confirmUpload, renameUpload, deleteUpload, deleteQuestionSource, deleteBankQuestion, editBankQuestion } from './api'
 import { QuestionBank } from './components/QuestionBank'
 import { PaperBuilder } from './components/PaperBuilder'
 import { UploadReviewModal } from './components/UploadReviewModal'
 import { AutoGenerateModal } from './components/AutoGenerateModal'
-import { mathToHtml } from './components/MathText'
-import type { BankQuestion, PaperItem, PaperTab, RawQuestion } from './types'
-import { MARKS_DEFAULT } from './types'
+import { Dashboard } from './components/Dashboard'
+import { DashboardUploadModal } from './components/DashboardUploadModal'
+import { PaperConfigDialog } from './components/PaperConfigDialog'
+import type { BankQuestion, PaperItem, PaperSection, PaperTab, RawQuestion, PaperConfiguration } from './types'
+import { MARKS_DEFAULT, DEFAULT_PAPER_CONFIG } from './types'
 import { cleanText, jaccardSimilarity, mkUid } from './utils'
+import { composePaper } from './paper-composer/composer'
 
-export type ExportCol = 'num' | 'question' | 'marks' | 'source'
-
-const newTab = (title = 'New Paper'): PaperTab => ({ id: mkUid(), title, items: [] })
-const escHtml = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+const newTab = (title = 'New Paper'): PaperTab => ({ id: mkUid(), title, items: [], sections: [], config: { ...DEFAULT_PAPER_CONFIG } })
 
 type BankCache = Record<string, BankQuestion[]>
 
 export default function App() {
+  // ── Routing ───────────────────────────────────────────────────────────
+  const navigate = useNavigate()
+  const location = useLocation()
+  const view = location.pathname === '/builder' ? 'builder' : 'dashboard'
+  const goTo  = useCallback((path: '/' | '/builder') => navigate(path), [navigate])
+
+  // ── Dashboard upload modal ────────────────────────────────────────────
+  const [showDashboardUpload, setShowDashboardUpload] = useState(false)
+
   // ── Subject / source selection ─────────────────────────────────────────
   const [subjectMap, setSubjectMap]   = useState<Record<string, Record<string, number>>>({})
   const [subject, setSubject]         = useState('science')
@@ -54,18 +63,20 @@ export default function App() {
   const [mergeDialog, setMergeDialog] =
     useState<{ id: string; name: string; target: string } | null>(null)
 
+  // ── Section state ─────────────────────────────────────────────────────
+  const [activeSectionId, setActiveSectionId]   = useState<string | null>(null)
+
   // ── Auto-generate ─────────────────────────────────────────────────────
   const [showAutoGenerate, setShowAutoGenerate] = useState(false)
 
-  // ── Export ────────────────────────────────────────────────────────────
-  const [exportCols, setExportCols]   = useState<Set<ExportCol>>(
-    new Set(['num', 'question', 'marks', 'source'])
-  )
+  // ── Config dialog ─────────────────────────────────────────────────────
+  const [showConfigDialog, setShowConfigDialog] = useState(false)
 
   // ── Derived ───────────────────────────────────────────────────────────
   const activePaper   = papers.find(p => p.id === activeId) ?? papers[0]
   const paper         = activePaper.items
   const paperTitle    = activePaper.title
+  const paperConfig   = activePaper.config
   const lockedSubject = paper.find(i => i.subject !== 'custom')?.subject ?? null
   const bankKey       = `${subject}/${source}`
   const bankQuestions = bankCache[bankKey] ?? []
@@ -161,6 +172,45 @@ export default function App() {
     setPapers(prev => prev.map(p => p.id === activeId ? { ...p, title } : p))
   }, [activeId])
 
+  const setFullConfig = useCallback((config: PaperConfiguration) => {
+    setPapers(prev => prev.map(p =>
+      p.id === activeId ? { ...p, config } : p
+    ))
+  }, [activeId])
+
+  // ── Section helpers ───────────────────────────────────────────────────
+  const setSections = useCallback((updater: (prev: PaperSection[]) => PaperSection[]) => {
+    setPapers(prev => prev.map(p =>
+      p.id === activeId ? { ...p, sections: updater(p.sections) } : p
+    ))
+  }, [activeId])
+
+  const handleAddSection = useCallback((sec: PaperSection) => {
+    setSections(prev => [...prev, sec])
+    setActiveSectionId(sec.id)
+  }, [setSections])
+
+  const handleUpdateSection = useCallback((id: string, updates: Partial<PaperSection>) => {
+    setSections(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s))
+    if (updates.marksPerQ != null) {
+      setItems(prev => prev.map(i => i.sectionId === id ? { ...i, marks: updates.marksPerQ! } : i))
+    }
+  }, [setSections])
+
+  const handleDeleteSection = useCallback((id: string) => {
+    setSections(prev => prev.filter(s => s.id !== id))
+    setItems(prev => prev.map(i => i.sectionId === id ? { ...i, sectionId: null } : i))
+    setActiveSectionId(prev => {
+      if (prev !== id) return prev
+      const remaining = activePaper.sections.filter(s => s.id !== id)
+      return remaining[0]?.id ?? null
+    })
+  }, [setSections, activePaper.sections])
+
+  const handleMoveToSection = useCallback((uid: string, sectionId: string | null) => {
+    setItems(prev => prev.map(i => i.uid === uid ? { ...i, sectionId } : i))
+  }, [setItems])
+
   // ── Paper tab management ──────────────────────────────────────────────
   const handleNewPaper = useCallback(() => {
     const tab = newTab()
@@ -168,7 +218,11 @@ export default function App() {
     setActiveId(tab.id)
   }, [])
 
-  const handleSwitchPaper = useCallback((id: string) => setActiveId(id), [])
+  const handleSwitchPaper = useCallback((id: string) => {
+    setActiveId(id)
+    const target = papers.find(p => p.id === id)
+    setActiveSectionId(target?.sections[0]?.id ?? null)
+  }, [papers])
 
   const handleRenameTab = useCallback((id: string, title: string) => {
     setPapers(prev => prev.map(p => p.id === id ? { ...p, title } : p))
@@ -195,17 +249,20 @@ export default function App() {
     if (paperQids.has(key)) {
       setItems(prev => prev.filter(i => !(i.subject === subject && i.source === source && i.qid === q.qid)))
     } else {
+      const activeSection = activePaper.sections.find(s => s.id === activeSectionId)
       const item: PaperItem = {
         ...q,
         uid:          mkUid(),
         subject,
-        marks:        MARKS_DEFAULT[q.type] ?? 2,
+        source,
+        marks:        activeSection?.marksPerQ ?? q.marks ?? MARKS_DEFAULT[q.type] ?? 2,
+        sectionId:    activeSectionId,
         isRephrased:  false,
         originalText: q.text,
       }
       setItems(prev => [...prev, item])
     }
-  }, [subject, source, paperQids, setItems])
+  }, [subject, source, paperQids, setItems, activeSectionId, activePaper.sections])
 
   const handleRemove      = useCallback((uid: string) => setItems(p => p.filter(i => i.uid !== uid)), [setItems])
   const handleMarksChange = useCallback((uid: string, marks: number) =>
@@ -255,9 +312,10 @@ export default function App() {
       images:       [],
       tables:       [],
       marks:        2,
+      sectionId:    activeSectionId,
       isRephrased:  false,
     }])
-  }, [setItems])
+  }, [setItems, activeSectionId])
 
   const handleReorder = useCallback((items: PaperItem[]) => setItems(() => items), [setItems])
 
@@ -429,13 +487,15 @@ export default function App() {
       setUploadPreview(null)
       setSubject('uploaded')
       setSource(result.id)
+      // After upload from dashboard, take the teacher straight to the builder
+      if (location.pathname !== '/builder') navigate('/builder')
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Save failed')
       setUploadPreview(null)
     } finally {
       setSaving(false)
     }
-  }, [uploadedSources])
+  }, [uploadedSources, uploadPreview, location.pathname, navigate])
 
   // ── Similarity maps ───────────────────────────────────────────────────
   const similarityMap = useMemo(() => {
@@ -472,69 +532,26 @@ export default function App() {
   }, [bankQuestions, paper, source, subject])
 
   // ── Export ────────────────────────────────────────────────────────────
-  const handleToggleExportCol = useCallback((col: ExportCol) => {
-    setExportCols(prev => {
-      const next = new Set(prev)
-      next.has(col) ? next.delete(col) : next.add(col)
-      return next
-    })
+  // Opens the Paper Details dialog.
+  const handleExport = useCallback(() => {
+    setShowConfigDialog(true)
   }, [])
 
-  const handleExport = useCallback(() => {
+  // Called by PaperConfigDialog — persists config and opens the composed print window.
+  const handleConfirmExport = useCallback((config: PaperConfiguration) => {
+    setFullConfig(config)
+    setShowConfigDialog(false)
+
     const win = window.open('', '_blank')
     if (!win) return
-    const totalMarks = paper.reduce((s, i) => s + i.marks, 0)
-    const supabase   = import.meta.env.VITE_SUPABASE_IMAGES_URL
-    const imgBase    = supabase || 'http://localhost:5050/api/images'
-    const cols       = exportCols
 
-    const thCells = [
-      cols.has('num')      && '<th>#</th>',
-      cols.has('question') && '<th>Question</th>',
-      cols.has('marks')    && '<th>Marks</th>',
-      cols.has('source')   && '<th>Source</th>',
-    ].filter(Boolean).join('')
+    const imgBase = import.meta.env.VITE_SUPABASE_IMAGES_URL || 'http://localhost:5050/api/images'
+    const html    = composePaper(paper, config, { imgBase, paperTitle }, activePaper.sections)
 
-    const rows = paper.map((item, idx) => {
-      const srcLabel = sourceLabels[item.source] ?? item.source
-      const qLabel   = item.type === 'custom'
-        ? 'Custom'
-        : `Q${item.number} (${item.subject} / ${srcLabel})`
-      const imgs = item.images.map(img =>
-        `<img src="${imgBase}/${item.subject}/${item.source}/${img.file}"
-              style="max-width:320px;height:auto;display:block;margin-top:8px;border:1px solid #ddd;padding:4px"/>`
-      ).join('')
-      const tdCells = [
-        cols.has('num')      && `<td>${idx + 1}</td>`,
-        cols.has('question') && `<td style="white-space:pre-wrap">${mathToHtml(cleanText(item.text))}${imgs}</td>`,
-        cols.has('marks')    && `<td>${item.marks}</td>`,
-        cols.has('source')   && `<td><span style="font-size:11px;color:#555">${qLabel}</span></td>`,
-      ].filter(Boolean).join('')
-      return `<tr>${tdCells}</tr>`
-    }).join('')
-
-    win.document.write(`<!doctype html><html><head>
-      <title>${paperTitle}</title>
-      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-      <style>
-        body{font-family:Arial,sans-serif;padding:32px;color:#111}
-        h1{font-size:20px;text-align:center;margin-bottom:4px}
-        p.meta{text-align:center;color:#555;margin-bottom:24px}
-        table{width:100%;border-collapse:collapse}
-        th,td{border:1px solid #ccc;padding:8px 10px;vertical-align:top;text-align:left}
-        th{background:#f5f5f5}
-        @media print{body{padding:16px}}
-      </style></head><body>
-      <h1>${escHtml(paperTitle)}</h1>
-      <p class="meta">Total Marks: ${totalMarks} &nbsp;|&nbsp; Questions: ${paper.length}</p>
-      <table>
-        <thead><tr>${thCells}</tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </body></html>`)
+    win.document.write(html)
     win.document.close()
     setTimeout(() => win.print(), 400)
-  }, [paper, paperTitle, exportCols, sourceLabels])
+  }, [paper, paperTitle, setFullConfig])
 
   // ── Filtered bank ─────────────────────────────────────────────────────
   const visibleQuestions = useMemo(() =>
@@ -551,24 +568,56 @@ export default function App() {
     <div className="flex flex-col h-screen bg-gray-50">
       <header className="flex items-center justify-between px-6 py-3 bg-indigo-700 text-white shadow-md shrink-0">
         <div className="flex items-center gap-3">
-          <span className="text-xl font-bold tracking-tight">QP Builder</span>
+          <button
+            onClick={() => goTo('/')}
+            className="text-xl font-bold tracking-tight hover:text-indigo-200 transition-colors
+                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white
+                       focus-visible:ring-offset-2 focus-visible:ring-offset-indigo-700 rounded"
+          >
+            QP Builder
+          </button>
           <span className="text-indigo-300 text-sm">MVP</span>
+          {view === 'builder' && (
+            <button
+              onClick={() => goTo('/')}
+              className="text-xs text-indigo-300 hover:text-white transition-colors
+                         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white
+                         focus-visible:ring-offset-1 focus-visible:ring-offset-indigo-700 rounded px-1"
+            >
+              ← Home
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-4">
-          <span className="text-sm text-indigo-200">
-            {paper.length} question{paper.length !== 1 ? 's' : ''} · {totalMarks} marks
-          </span>
-          <button
-            onClick={handleExport}
-            disabled={paper.length === 0}
-            className="px-4 py-1.5 bg-white text-indigo-700 rounded-md text-sm font-medium
-                       hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
-          >
-            Export / Print
-          </button>
+          {view === 'builder' && (
+            <>
+              <span className="text-sm text-indigo-200">
+                {paper.length} question{paper.length !== 1 ? 's' : ''} · {totalMarks} marks
+              </span>
+              <button
+                onClick={handleExport}
+                disabled={paper.length === 0}
+                className="px-4 py-1.5 bg-white text-indigo-700 rounded-md text-sm font-medium
+                           hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                Export / Print
+              </button>
+            </>
+          )}
         </div>
       </header>
 
+      {view === 'dashboard' ? (
+        <Dashboard
+          subjectMap={effectiveSubjectMap}
+          uploadedSources={uploadedSources}
+          papers={papers}
+          onBrowseAndBuild={() => goTo('/builder')}
+          onUploadBank={() => setShowDashboardUpload(true)}
+          onGenerateFromBlueprint={() => {}}
+          onOpenPaper={(id) => { setActiveId(id); goTo('/builder') }}
+        />
+      ) : (
       <div className="flex flex-1 overflow-hidden">
         <QuestionBank
           subjectMap={effectiveSubjectMap}
@@ -607,8 +656,13 @@ export default function App() {
           paperTitle={paperTitle}
           setPaperTitle={setTitle}
           rephrasing={rephrasing}
-          exportCols={exportCols}
-          onToggleExportCol={handleToggleExportCol}
+          sections={activePaper.sections}
+          activeSectionId={activeSectionId}
+          onActiveSectionChange={setActiveSectionId}
+          onAddSection={handleAddSection}
+          onUpdateSection={handleUpdateSection}
+          onDeleteSection={handleDeleteSection}
+          onMoveToSection={handleMoveToSection}
           onSwitchPaper={handleSwitchPaper}
           onNewPaper={handleNewPaper}
           onCloseTab={handleCloseTab}
@@ -626,6 +680,17 @@ export default function App() {
           onClearPaper={() => setItems(() => [])}
         />
       </div>
+      )}
+
+      {/* ── Dashboard upload modal ───────────────────────────────────────── */}
+      {showDashboardUpload && !uploadPreview && (
+        <DashboardUploadModal
+          uploading={uploading}
+          uploadError={uploadError}
+          onUpload={handleUpload}
+          onCancel={() => { setShowDashboardUpload(false); setUploadError(null) }}
+        />
+      )}
 
       {/* ── Upload review modal ──────────────────────────────────────────── */}
       {uploadPreview && (
@@ -650,6 +715,19 @@ export default function App() {
           paperQids={paperQids}
           onGenerate={handleAutoGenerate}
           onCancel={() => setShowAutoGenerate(false)}
+        />
+      )}
+
+      {/* ── Paper config / export dialog ───────────────────────────────── */}
+      {showConfigDialog && (
+        <PaperConfigDialog
+          config={paperConfig}
+          computedMarks={paper.reduce((s, i) => s + i.marks, 0)}
+          questionCount={paper.length}
+          sections={activePaper.sections}
+          items={paper}
+          onExport={handleConfirmExport}
+          onCancel={() => setShowConfigDialog(false)}
         />
       )}
 

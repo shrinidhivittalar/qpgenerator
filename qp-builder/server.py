@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from pathlib import Path
-from groq import Groq
+import google.generativeai as genai
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from datetime import datetime, timezone
@@ -22,8 +22,8 @@ _db         = _mongo["qp_builder"]
 qs_col      = _db["questions"]   # static question banks
 uploads_col = _db["uploads"]     # user-uploaded papers
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL       = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # ── Supabase (optional — image upload skipped if not configured) ──────────────
 try:
@@ -42,18 +42,43 @@ MIN_IMG_PX = 80   # skip decorative images / icons smaller than this
 # ── Parse prompts (paper-type hints) ─────────────────────────────────────────
 
 LATEX_RULE = (
-    "Math/chemistry: use LaTeX inline — $\\ce{H2SO4}$ for chemical formulas, "
-    "$\\ce{A + B -> C}$ for reactions, $\\frac{1}{2}$ for fractions, "
-    "$x^2$ for powers, $\\sqrt{x}$ for roots. Plain text otherwise."
+    "MATH FORMATTING — convert ALL mathematical expressions to LaTeX inline ($...$):\n"
+    "• Fractions: n(n+1)/2 → $\\frac{n(n+1)}{2}$\n"
+    "• Powers/exponents: x2 or x² → $x^{2}$, 2n → $2^{n}$\n"
+    "• Subscripts: a1, b2 → $a_{1}$, $b_{2}$\n"
+    "• Roots: √x, √(a²+b²) → $\\sqrt{x}$, $\\sqrt{a^{2}+b^{2}}$\n"
+    "• Multiplication: 52 × 2 → $52 \\times 2$  (wrap the WHOLE expression, not just the symbol)\n"
+    "• Not-equal: ≠ → $\\neq$\n"
+    "• Ratios/proportions: a/b → $\\frac{a}{b}$\n"
+    "• Trigonometry: sin30°, cos²θ → $\\sin 30°$, $\\cos^{2}\\theta$\n"
+    "• Chemical formulas: H2SO4 → $\\ce{H2SO4}$\n"
+    "Plain prose sentences do NOT need LaTeX. Only wrap math expressions.\n"
+    "NEVER use \\text{\\textquotesingle} or \\text{\\textquotedbl} — write ' and \" directly."
 )
 
 PARSE_PROMPTS: dict[str, str] = {
     "sslc_qp": f"""\
-Extract questions from this Karnataka SSLC question paper. Return ONLY a JSON array.
-Each item: {{"number":<int>,"text":<full question>,"type":"mcq"|"figure_based"|"text","options":null|["A","B","C","D"]}}
-Rules: mcq=has A/B/C/D options; figure_based=mentions figure/diagram/circuit/graph; text=everything else.
-Karnataka SSLC papers have ~40 questions split into parts A/B/C/D or sections I-VI.
-Skip page headers (83-E, 81-E, etc.), footers, and general instructions. Keep original question wording.
+Extract questions from this Karnataka SSLC question paper chunk. Return ONLY a JSON array.
+Each item: {{"number":<int>,"text":<full question text>,"type":"mcq"|"figure_based"|"text","options":null|["<full text of option A>","<full text of option B>","<full text of option C>","<full text of option D>"]}}
+
+Type rules:
+- "mcq": question has (A)(B)(C)(D) answer choices → "options" MUST contain the FULL TEXT of each choice, e.g. ["volt (V)", "ampere (A)", "coulomb (C)", "ohm meter (Ωm)"]
+- "figure_based": question references a figure/diagram/circuit/graph or asks to draw something → "options": null
+- "text": everything else → "options": null
+
+Structure rules (CRITICAL):
+- ONE numbered question (1., 2., 3. …) = ONE JSON item, regardless of how many sub-parts it has
+- Sub-parts labeled a/b or i/ii/iii: keep ALL sub-parts in the single "text" field of that item — do NOT split them into multiple items
+- OR alternatives: append the full OR text to the same item's "text" field, joined with " OR " — do NOT create a separate item for the OR alternative
+- Do NOT number sub-parts or OR alternatives as separate questions
+
+Skip ONLY:
+- Page headers/footers (83-E, 81-E, page numbers)
+- Section/part labels (PART A, PART B, SECTION I, Roman numeral headers like "I.", "II.", "III." that are section labels not question numbers)
+- Mark allocations (3×1=3, 2x4=8, etc.)
+- General instructions at the top of the paper
+
+Include EVERY numbered question. Keep original wording exactly.
 {LATEX_RULE}
 
 Text:
@@ -70,9 +95,13 @@ Text:
 """,
     "generic": f"""\
 Extract exam questions from the text. Return ONLY a JSON array, no other text.
-Each item: {{"number":<int>,"text":<full question>,"type":"mcq"|"figure_based"|"text","options":null|["A","B","C","D"]}}
-Rules: mcq=has A/B/C/D options; figure_based=mentions figure/diagram; text=everything else.
-Skip headers/footers/instructions. Keep original wording.
+Each item: {{"number":<int>,"text":<full question text>,"type":"mcq"|"figure_based"|"text","options":null|["<full text of option A>","<full text of option B>","<full text of option C>","<full text of option D>"]}}
+Rules:
+- mcq = has (A)(B)(C)(D) choices → options array contains FULL TEXT of each choice (not just letters)
+- figure_based = references figure/diagram or asks to draw
+- text = everything else → options: null
+- ONE numbered question = ONE item; keep sub-parts (a/b/c) together in "text"; include OR alternatives in the same "text" field
+Skip headers/footers/instructions/mark allocations. Keep original wording.
 {LATEX_RULE}
 
 Text:
@@ -141,26 +170,124 @@ FIGURE_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
-CHUNK_SIZE = 6000   # chars per Groq call — ~1500 tokens, well under 6k TPM free tier
-CHUNK_OVERLAP = 300 # overlap to avoid cutting a question at the boundary
+CHUNK_SIZE    = 6000   # chars per Gemini call — smaller chunks → fewer questions per call → less output token pressure
+CHUNK_OVERLAP = 800    # overlap so questions at chunk boundaries always appear in at least one full chunk
+MAX_CHUNKS    = 45     # covers large textbook banks up to ~234 000 chars (~120+ pages)
 
 
-def _call_groq_chunk(text_chunk: str, paper_type: str) -> list[dict]:
+def _decode_unicode_escapes(s: str) -> str:
+    """Decode \\uXXXX sequences the LLM sometimes outputs as literal text."""
+    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+
+
+def _salvage_partial_json(raw: str) -> list[dict]:
+    """Extract complete JSON objects from a truncated array string."""
+    items: list[dict] = []
+    depth = 0
+    start = None
+    for i, ch in enumerate(raw):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(raw[start:i + 1])
+                    if isinstance(obj, dict):
+                        items.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                start = None
+    return items
+
+
+def _call_groq_chunk(text_chunk: str, paper_type: str, chunk_idx: int = 0) -> list[dict]:
     prompt = PARSE_PROMPTS.get(paper_type, PARSE_PROMPTS["generic"])
-    resp = groq_client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt + text_chunk}],
-        max_tokens=1500,
-        temperature=0.05,
+    gem  = genai.GenerativeModel(MODEL)
+    resp = gem.generate_content(
+        prompt + text_chunk,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            max_output_tokens=8192,
+            temperature=0.05,
+        ),
     )
-    raw = resp.choices[0].message.content.strip()
-    m = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not m:
-        return []
+    raw    = resp.text.strip()
+    finish = resp.candidates[0].finish_reason.name if resp.candidates else "UNKNOWN"
+    print(f"[chunk {chunk_idx}] finish={finish!r}  raw_len={len(raw)}  preview={raw[:120]!r}")
+
     try:
-        return json.loads(m.group())
-    except json.JSONDecodeError:
-        return []
+        items = json.loads(raw)
+        if isinstance(items, list):
+            print(f"[chunk {chunk_idx}] parse ok → {len(items)} items")
+            return _postprocess_items(items)
+    except json.JSONDecodeError as e:
+        print(f"[chunk {chunk_idx}] JSON parse failed: {e}")
+        if finish == "MAX_TOKENS":
+            salvaged = _salvage_partial_json(raw)
+            print(f"[chunk {chunk_idx}] salvaged {len(salvaged)} items from truncated output")
+            if salvaged:
+                return _postprocess_items(salvaged)
+
+    return []
+
+
+def _postprocess_items(items: list) -> list[dict]:
+    """Decode unicode escapes on text/options fields."""
+    for item in items:
+        if isinstance(item.get("text"), str):
+            item["text"] = _decode_unicode_escapes(item["text"])
+        if isinstance(item.get("options"), list):
+            item["options"] = [_decode_unicode_escapes(o) for o in item["options"]]
+    return items
+
+
+# Imperative / interrogative words that signal an actual question or task.
+_QUESTION_VERB_RE = re.compile(
+    r'\b(find|prove|solve|calculate|show|draw|write|express|determine|evaluate|'
+    r'construct|verify|obtain|derive|discuss|divide|check|mention|name|define|'
+    r'list|explain|analyse|analyze|observe|convert|identify|state|choose|clarify|'
+    r'what|which|how|why|when|where|who)\b',
+    re.IGNORECASE,
+)
+
+# Definition phrasings that mark reference statements, not questions.
+_DEFINITION_RE = re.compile(
+    r'\bis called\b|\bare called\b|\bis given by\b|\bis defined as\b|\bis a special case\b',
+    re.IGNORECASE,
+)
+
+
+def _is_reference_statement(text: str, q_type: str, options) -> bool:
+    """
+    True when an extracted item is a formula / definition / theorem statement from a
+    reference section (e.g. the "VERY IMPORTANT FORMULAE / STATEMENTS" block of a
+    textbook) rather than an actual question. Conservative — only flags high-confidence
+    non-questions so genuine questions are never dropped.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    # MCQ with options is always a real question.
+    if q_type == "mcq" and options:
+        return False
+    # Explicit question mark or an imperative/interrogative verb → real question.
+    if "?" in t or _QUESTION_VERB_RE.search(t):
+        return False
+    # Definition phrasing → reference statement.
+    if _DEFINITION_RE.search(t):
+        return True
+    # Bare formula / relation (=, ≤, ≥) with no task verb → reference statement.
+    if re.search(r'[=≤≥]', t):
+        return True
+    # Named theorem / criterion / lemma / algorithm / postulate intro → statement.
+    if ":" in t and re.search(
+        r'\b(theorem|criterion|lemma|algorithm|postulate|identit)\w*\b', t, re.IGNORECASE
+    ):
+        return True
+    return False
 
 
 def parse_paper(full_text: str, paper_type: str) -> tuple[list[dict], list[str]]:
@@ -172,21 +299,17 @@ def parse_paper(full_text: str, paper_type: str) -> tuple[list[dict], list[str]]
 
     warnings: list[str] = []
 
-    # Build at most 2 chunks to stay under free-tier TPM
-    if len(full_text) <= CHUNK_SIZE:
-        chunks = [full_text]
-    else:
-        chunks = [
-            full_text[:CHUNK_SIZE],
-            full_text[CHUNK_SIZE - CHUNK_OVERLAP: 2 * CHUNK_SIZE - CHUNK_OVERLAP],
-        ]
-        if len(full_text) > 2 * CHUNK_SIZE - CHUNK_OVERLAP:
-            warnings.append(
-                f"Paper is long ({len(full_text)} chars). "
-                "Only the first ~12 000 characters were parsed — questions near the end may be missing."
-            )
+    # Split into chunks with overlap so questions aren't cut at boundaries
+    step = CHUNK_SIZE - CHUNK_OVERLAP
+    chunks = [full_text[i: i + CHUNK_SIZE] for i in range(0, len(full_text), step)]
+    chunks = chunks[:MAX_CHUNKS]
+    if len(full_text) > MAX_CHUNKS * step:
+        warnings.append(
+            f"Paper is very long ({len(full_text)} chars). "
+            f"Only the first ~{MAX_CHUNKS * CHUNK_SIZE // 1000}k characters were parsed."
+        )
 
-    seen_nums: set[int] = set()
+    seen_texts: set[str] = set()
     raw_questions: list[dict] = []
 
     for i, chunk in enumerate(chunks):
@@ -195,30 +318,37 @@ def parse_paper(full_text: str, paper_type: str) -> tuple[list[dict], list[str]]
         if i > 0:
             time.sleep(1.5)  # pace calls to respect free-tier TPM
         try:
-            items = _call_groq_chunk(chunk, paper_type)
+            items = _call_groq_chunk(chunk, paper_type, chunk_idx=i)
         except Exception as e:
             warnings.append(f"Parse error on section {i + 1}: {str(e)[:120]}")
             continue
 
         for item in items:
             text = (item.get("text") or "").strip()
-            if not text or len(text) < 8:
+            if not text or len(text) < 4:
                 continue
-            try:
-                num = int(item.get("number") or 0)
-            except (ValueError, TypeError):
-                num = 0
-            if num and num in seen_nums:
-                continue  # cross-chunk duplicate
-            if num:
-                seen_nums.add(num)
+
+            # Dedup by text content — LLM renumbers questions in each chunk so
+            # number-based dedup drops all but the first chunk's questions
+            text_key = text[:80].lower()
+            if text_key in seen_texts:
+                continue
+            seen_texts.add(text_key)
+
             q_type = item.get("type", "text")
             if q_type not in ("mcq", "figure_based", "text"):
                 q_type = "text"
+
+            # Skip formula / definition / theorem statements from reference sections
+            # so they never enter the question bank.
+            if _is_reference_statement(text, q_type, item.get("options")):
+                print(f"[parse] skipped reference statement: {text[:70]!r}")
+                continue
+
             if q_type == "text" and FIGURE_HINT_RE.search(text):
                 q_type = "figure_based"
             raw_questions.append({
-                "number":  num or len(raw_questions) + 1,
+                "number":  len(raw_questions) + 1,  # renumber sequentially after dedup
                 "text":    text,
                 "type":    q_type,
                 "options": item.get("options"),
@@ -242,46 +372,64 @@ FIGURE_DPI    = 150   # render resolution for figure clips
 MARGIN_X      = 36    # ~0.5 inch left/right trim when clipping figure regions
 
 
-def _text_y_ranges(page) -> list[tuple[float, float]]:
-    """Sorted (y_top, y_bottom) for every non-empty text block on the page."""
+# A text block only counts as a figure boundary if it's a real line of prose,
+# not a short diagram label ("Glass prism", "N", "incident ray", "60°", …).
+# Otherwise labels inside a diagram crop the figure to a thin sliver.
+_LABEL_MAX_CHARS = 25
+
+
+def _text_y_ranges(page) -> list[tuple[float, float, bool]]:
+    """Sorted (y_top, y_bottom, is_prose) for every non-empty text block."""
     ranges = []
     for b in page.get_text("blocks"):
         x0, y0, x1, y1, text, _, block_type = b
-        if block_type == 0 and text.strip():
-            ranges.append((y0, y1))
+        t = text.strip()
+        if block_type == 0 and t:
+            is_prose = len(t) >= _LABEL_MAX_CHARS
+            ranges.append((y0, y1, is_prose))
     ranges.sort()
     return ranges
 
 
-def _figure_region(page, img_y: float, text_ranges: list) -> fitz.Rect:
+def _figure_region(page, img_top: float, img_bottom: float, text_ranges: list) -> fitz.Rect:
     """
-    Return a clip rect spanning from the bottom of the last text block above
-    the image to the top of the first text block below it.
-    Rendering this region at FIGURE_DPI captures both raster images AND
-    vector graphics (geometry lines, axes, circuit paths) in that gap.
+    Return a clip rect spanning the full image plus any gap up to the nearest
+    *prose* text block above and below it. Short diagram labels are ignored so
+    interior/adjacent labels never crop the figure. The rect is always at least
+    as tall as the image itself.
+    Rendering this region at FIGURE_DPI captures both raster images AND vector
+    graphics (geometry lines, axes, circuit paths) in that gap.
     """
-    pr        = page.rect
-    gap_top   = pr.y0
+    pr         = page.rect
+    gap_top    = pr.y0
     gap_bottom = pr.y1
 
-    for y0, y1 in text_ranges:
-        if y1 <= img_y:
-            gap_top = max(gap_top, y1)
-        elif y0 > img_y:
-            gap_bottom = min(gap_bottom, y0)
+    for y0, y1, is_prose in text_ranges:
+        if not is_prose:
+            continue                       # skip short labels
+        if y1 <= img_top + 2:
+            gap_top = max(gap_top, y1)     # last prose above the image
+        elif y0 >= img_bottom - 2:
+            gap_bottom = min(gap_bottom, y0)  # first prose below the image
             break
+
+    # Never crop the image itself — clamp the gap around its full extent.
+    gap_top    = min(gap_top, img_top)
+    gap_bottom = max(gap_bottom, img_bottom)
 
     return fitz.Rect(pr.x0 + MARGIN_X, gap_top, pr.x1 - MARGIN_X, gap_bottom)
 
 
 def extract_layout_items(doc) -> list[dict]:
     """
-    Return text and image items in reading order across all pages.
+    Return text and image items interleaved in reading order across all pages.
 
-    Images are extracted via page.get_image_info() + figure-region rendering
-    (page.get_pixmap with a clip rect at FIGURE_DPI). This captures both
-    embedded raster images and surrounding vector graphics (geometry, circuits,
-    graph axes) that the get_text("dict") type=1 approach would miss entirely.
+    Text blocks come from get_text("blocks") so each block keeps its y-position,
+    allowing correct interleaving with image positions for figure assignment.
+    (The LLM full-text is built separately with sort=True for math reading order.)
+
+    Images are rendered as figure-region clips at FIGURE_DPI so that vector
+    graphics (geometry, circuits, graph axes) are captured alongside raster images.
     """
     items: list[dict] = []
 
@@ -289,24 +437,23 @@ def extract_layout_items(doc) -> list[dict]:
         text_ranges = _text_y_ranges(page)
         page_blocks: list[dict] = []
 
-        # ── text blocks ──────────────────────────────────────────────────────
+        # ── individual text blocks with y-positions (for correct interleaving) ──
         for b in page.get_text("blocks"):
-            x0, y0, x1, y1, text, _, block_type = b
-            if block_type == 0:
-                stripped = text.strip()
-                if stripped:
-                    page_blocks.append({"type": "text", "y": y0, "text": stripped})
+            x0, y0, x1, y1, text, _block_num, block_type = b
+            if block_type == 0 and text.strip():
+                page_blocks.append({"type": "text", "y": y0, "text": text.strip()})
 
         # ── image blocks (rendered as figure-region clips) ───────────────────
         seen: set[tuple[int, int]] = set()
         for img_info in page.get_image_info(xrefs=True):
-            bbox  = img_info["bbox"]
-            img_y = bbox[1]
+            bbox       = img_info["bbox"]
+            img_y      = bbox[1]      # top, used for reading-order sort
+            img_bottom = bbox[3]      # bottom, for full-height clipping
             w     = img_info["width"]
             h     = img_info["height"]
             if w < MIN_IMG_PX or h < MIN_IMG_PX:
                 continue
-            clip = _figure_region(page, img_y, text_ranges)
+            clip = _figure_region(page, img_y, img_bottom, text_ranges)
             key  = (round(clip.y0), round(clip.y1))
             if key in seen:
                 continue  # two images in same gap → render once
@@ -325,11 +472,41 @@ def extract_layout_items(doc) -> list[dict]:
             except Exception:
                 continue
 
+        # ── table blocks ──────────────────────────────────────────────────────
+        try:
+            for tbl in page.find_tables().tables:
+                x0, y0, x1, y1 = tbl.bbox
+                rows_data = tbl.extract()
+                if not rows_data or len(rows_data) < 2:
+                    continue
+                headers = [str(c or '').strip() for c in rows_data[0]]
+                if not any(headers):
+                    continue
+                data_rows = [
+                    {h: str(row[j] or '').strip()
+                     for j, h in enumerate(headers) if h}
+                    for row in rows_data[1:]
+                    if any(cell for cell in row)
+                ]
+                if not data_rows:
+                    continue
+                page_blocks.append({
+                    "type":    "table",
+                    "y":       y0,
+                    "headers": headers,
+                    "rows":    data_rows,
+                })
+        except Exception:
+            pass   # find_tables() not available in older PyMuPDF builds
+
         # sort all blocks on this page by vertical position
         page_blocks.sort(key=lambda b: b["y"])
         for b in page_blocks:
             if b["type"] == "text":
                 items.append({"type": "text", "text": b["text"]})
+            elif b["type"] == "table":
+                items.append({"type": "table",
+                               "headers": b["headers"], "rows": b["rows"]})
             else:
                 items.append({"type": "image", "data": b["data"],
                                "ext": b["ext"], "w": b["w"], "h": b["h"]})
@@ -337,26 +514,99 @@ def extract_layout_items(doc) -> list[dict]:
     return items
 
 
+_Q_NUM_RE_LOOSE = re.compile(r'^\s*(?:Q\.?\s*)?(\d{1,2})\s*[\.\)]\s*$', re.IGNORECASE)
+
+
+def _find_q_num(line: str, q_nums: set) -> int | None:
+    """Return the question number if the line opens a new question, else None."""
+    stripped = line.strip()
+    m = _Q_NUM_RE.match(stripped) or _Q_NUM_RE_LOOSE.match(stripped)
+    if m:
+        num = int(m.group(1))
+        if num in q_nums:
+            return num
+    return None
+
+
 def assign_images_to_questions(layout_items: list[dict], questions: list[dict]) -> dict[int, list[dict]]:
     """
     Walk layout items in order. When a text block opens a new question number,
     subsequent images are assigned to that question until the next question starts.
+    Images appearing before any question is opened are held as 'pending' and assigned
+    to the next question that opens (handles figures placed above question text in PDF).
     """
-    q_nums     = {q["number"] for q in questions}
-    image_map: dict[int, list[dict]] = {q["number"]: [] for q in questions}
+    q_nums    = {q["number"] for q in questions}
+    image_map = {q["number"]: [] for q in questions}
     current_q: int | None = None
+    pending:   list[dict] = []   # images seen before any question opens
+
+    img_items  = [i for i in layout_items if i["type"] == "image"]
+    text_items = [i for i in layout_items if i["type"] == "text"]
+    print(f"[assign] {len(text_items)} text blocks, {len(img_items)} image blocks, q_nums={sorted(q_nums)[:10]}...")
 
     for item in layout_items:
         if item["type"] == "text":
-            m = _Q_NUM_RE.match(item["text"])
-            if m:
-                num = int(m.group(1))
-                if num in q_nums:
+            for line in item["text"].splitlines():
+                num = _find_q_num(line, q_nums)
+                if num is not None:
                     current_q = num
-        elif item["type"] == "image" and current_q is not None:
-            image_map[current_q].append(item)
+                    print(f"[assign] → Q{num} opened")
+                    if pending:
+                        image_map[current_q].extend(pending)
+                        print(f"[assign] flushed {len(pending)} pending image(s) → Q{current_q}")
+                        pending.clear()
+                    break
+        elif item["type"] == "image":
+            print(f"[assign] image found, current_q={current_q}")
+            if current_q is not None:
+                image_map[current_q].append(item)
+            else:
+                pending.append(item)
 
+    # Any images still pending (no question ever opened after them) — attach to first q
+    if pending and q_nums:
+        first_q = min(q_nums)
+        image_map[first_q].extend(pending)
+        print(f"[assign] {len(pending)} orphaned image(s) → Q{first_q} (fallback)")
+
+    assigned = {k: len(v) for k, v in image_map.items() if v}
+    print(f"[assign] result: {assigned}")
     return image_map
+
+
+def assign_tables_to_questions(layout_items: list[dict], questions: list[dict]) -> dict[int, list[dict]]:
+    """
+    Walk layout items in order and assign table blocks to questions.
+    Same pending-flush logic as assign_images_to_questions.
+    """
+    q_nums    = {q["number"] for q in questions}
+    table_map = {q["number"]: [] for q in questions}
+    current_q: int | None = None
+    pending:   list[dict] = []
+
+    for item in layout_items:
+        if item["type"] == "text":
+            for line in item["text"].splitlines():
+                num = _find_q_num(line, q_nums)
+                if num is not None:
+                    current_q = num
+                    if pending:
+                        table_map[current_q].extend(pending)
+                        pending.clear()
+                    break
+        elif item["type"] == "table":
+            if current_q is not None:
+                table_map[current_q].append(item)
+            else:
+                pending.append(item)
+
+    if pending and q_nums:
+        table_map[min(q_nums)].extend(pending)
+
+    assigned = {k: len(v) for k, v in table_map.items() if v}
+    if assigned:
+        print(f"[assign_tables] result: {assigned}")
+    return table_map
 
 
 def upload_question_images(upload_id: str, image_map: dict[int, list[dict]]) -> dict[int, list[dict]]:
@@ -365,6 +615,7 @@ def upload_question_images(upload_id: str, image_map: dict[int, list[dict]]) -> 
     Returns {q_num: [{fid, file}]} with only questions that have images.
     Gracefully skips if Supabase is not configured or upload fails.
     """
+    print(f"[upload_images] supabase={'ok' if _supabase else 'NOT CONFIGURED'}")
     if not _supabase:
         return {}
 
@@ -377,6 +628,7 @@ def upload_question_images(upload_id: str, image_map: dict[int, list[dict]]) -> 
             ext      = img["ext"]
             filename = f"Q{q_num:02d}_{idx + 1}.{ext}"
             path     = f"uploaded/{upload_id}/{filename}"
+            print(f"[upload_images] uploading {path} ({len(img['data'])} bytes)...")
             try:
                 _supabase.storage.from_(SUPABASE_BUCKET).upload(
                     path=path,
@@ -387,11 +639,13 @@ def upload_question_images(upload_id: str, image_map: dict[int, list[dict]]) -> 
                     },
                 )
                 refs.append({"fid": f"Q{q_num:02d}_{idx + 1}", "file": filename})
+                print(f"  [upload_images] ✓ Q{q_num} img{idx + 1} uploaded OK")
             except Exception as e:
-                print(f"  [image upload] Q{q_num} img{idx + 1}: {e}")
+                print(f"  [upload_images] ✗ Q{q_num} img{idx + 1} FAILED: {e}")
         if refs:
             result[q_num] = refs
 
+    print(f"[upload_images] final refs: { {k: len(v) for k, v in result.items()} }")
     return result
 
 
@@ -417,12 +671,18 @@ def upload_qp():
         doc          = fitz.open(tmp.name)
         layout_items = extract_layout_items(doc)
         n_pages      = doc.page_count
+
+        # Build full_text with sort=True for better math reading order (LLM input)
+        # Done before doc.close() since extract_layout_items now uses get_text("blocks")
+        full_text = "\n".join(
+            page.get_text("text", sort=True).strip()
+            for page in doc
+        )
         doc.close()
-
-        full_text = "\n".join(i["text"] for i in layout_items if i["type"] == "text")
         avg_chars = len(full_text) / max(n_pages, 1)
+        print(f"[upload] pages={n_pages}  total_chars={len(full_text)}  avg_chars_per_page={avg_chars:.1f}")
 
-        if avg_chars < 60:
+        if avg_chars < 20:
             return jsonify({
                 "error": (
                     "This looks like a scanned PDF (very little extractable text). "
@@ -432,6 +692,7 @@ def upload_qp():
 
         name = Path(f.filename).stem
         raw_questions, warnings = parse_paper(full_text, paper_type)
+        print(f"[upload] parse_paper → {len(raw_questions)} questions, warnings={warnings}")
 
         if not raw_questions:
             return jsonify({"error": "No questions could be extracted from this PDF."}), 422
@@ -439,17 +700,82 @@ def upload_qp():
         # Generate upload_id at parse time so image paths are consistent at confirm time
         upload_id = uuid.uuid4().hex[:8]
 
-        # Assign images to questions by layout position, then upload to Supabase
+        # Assign images/tables to questions by layout position
         image_map  = assign_images_to_questions(layout_items, raw_questions)
+        table_map  = assign_tables_to_questions(layout_items, raw_questions)
         image_refs = upload_question_images(upload_id, image_map)
 
-        # Attach image refs to raw questions
+        # Attach image refs and inline tables to raw questions
         for q in raw_questions:
             q["images"] = image_refs.get(q["number"], [])
+            raw_tbls = table_map.get(q["number"], [])
+            # Only keep a table whose header text actually appears in the question.
+            # Tables assigned purely by layout position (e.g. reference/formula tables
+            # near a statement) don't reference the question and are dropped.
+            text_lc = q["text"].lower()
+
+            def _table_belongs(t: dict) -> bool:
+                headers = [str(h).strip().lower() for h in (t.get("headers") or []) if str(h).strip()]
+                return any(len(h) > 2 and h in text_lc for h in headers)
+
+            kept_tbls = [t for t in raw_tbls if _table_belongs(t)]
+            dropped = len(raw_tbls) - len(kept_tbls)
+            if dropped:
+                print(f"[upload] dropped {dropped} stray table(s) not referenced in Q{q['number']} text")
+
+            q["tables"] = [
+                {
+                    "tid":     f"Q{q['number']:02d}_T{j + 1}",
+                    "headers": t["headers"],
+                    "rows":    t["rows"],
+                }
+                for j, t in enumerate(kept_tbls)
+            ]
+            if q["tables"]:
+                if q["type"] == "text":
+                    q["type"] = "table_based"
+                # Strip inline table data that the LLM echoed into the question
+                # text, while preserving OR alternative stems.
+                #
+                # Algorithm: locate each table's first header in the text
+                # (searching forward from the previous hit to handle duplicate
+                # headers like two "Class interval" tables in an OR question).
+                # Then rebuild the text as:
+                #   stem1 [OR stem2] [OR stem3 …]
+                # where each stemN is the text just before that table's header.
+                text = q["text"]
+                headers = [(t["headers"] or [""])[0].strip() for t in q["tables"]]
+                positions: list[int] = []
+                search_from = 0
+                for h in headers:
+                    if h and len(h) > 2:
+                        pos = text.lower().find(h.lower(), search_from)
+                        if pos > max(10, search_from):
+                            positions.append(pos)
+                            search_from = pos + len(h)
+                        else:
+                            positions.append(-1)
+                    else:
+                        positions.append(-1)
+
+                if positions and positions[0] > 10:
+                    result = text[:positions[0]].rstrip(" :,\n")
+                    for i in range(1, len(positions)):
+                        if positions[i] == -1:
+                            continue
+                        segment = text[positions[i - 1]:positions[i]]
+                        or_m = re.search(r'(?i)\bOR\b', segment)
+                        if or_m:
+                            or_tail = segment[or_m.start():].rstrip(" :,\n")
+                            result = result + " " + or_tail
+                    q["text"] = result.strip()
 
         img_count = sum(len(v) for v in image_refs.values())
+        tbl_count = sum(len(v) for v in table_map.values() if v)
         if img_count:
             warnings = [f"{img_count} figure(s) extracted and attached."] + warnings
+        if tbl_count:
+            warnings = [f"{tbl_count} table(s) extracted and attached."] + warnings
 
         return jsonify({
             "upload_id": upload_id,
@@ -471,6 +797,8 @@ def confirm_upload():
     name      = (data.get("name") or "").strip()
     raw_items = data.get("questions", [])
     upload_id = (data.get("upload_id") or "").strip() or uuid.uuid4().hex[:8]
+    img_counts = {str(i+1): len(q.get("images") or []) for i, q in enumerate(raw_items) if q.get("images")}
+    print(f"[confirm] upload_id={upload_id!r}  questions={len(raw_items)}  img_counts={img_counts}")
 
     if not name:
         return jsonify({"error": "name required"}), 400
@@ -490,22 +818,41 @@ def confirm_upload():
         options = item.get("options")
         if not isinstance(options, list):
             options = None
+        qid = f"UP_{upload_id}_Q{i + 1:02d}"
+
         raw_images = item.get("images") or []
         images = [
             {"fid": img["fid"], "file": img["file"], "width": 0, "height": 0}
             for img in raw_images
             if isinstance(img, dict) and img.get("fid") and img.get("file")
         ]
+
+        raw_tables = item.get("tables") or []
+        tables = [
+            {
+                "tid":     tbl["tid"],
+                "qid":     qid,
+                "headers": tbl["headers"],
+                "rows":    tbl["rows"],
+            }
+            for tbl in raw_tables
+            if isinstance(tbl, dict)
+            and tbl.get("tid") and tbl.get("headers") is not None and tbl.get("rows") is not None
+        ]
+
+        if tables and q_type == "text":
+            q_type = "table_based"
+
         questions.append({
-            "qid":         f"UP_{upload_id}_Q{i + 1:02d}",
+            "qid":         qid,
             "number":      item.get("number", i + 1),
             "text":        q_text,
             "type":        q_type,
             "options":     options,
             "has_figure":  q_type == "figure_based" or bool(images),
-            "has_table":   False,
+            "has_table":   bool(tables),
             "images":      images,
-            "tables":      [],
+            "tables":      tables,
             "source":      "uploaded",
             "chapter":     None,
             "chapter_num": None,
@@ -643,16 +990,227 @@ def rephrase():
         return jsonify({"error": "no text"}), 400
     system_prompt = REPHRASE_PROMPTS.get(qtype, REPHRASE_PROMPTS["default"])
     try:
-        resp = groq_client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": text},
-            ],
-            max_tokens=300,
-            temperature=0.75,
+        gem  = genai.GenerativeModel(MODEL, system_instruction=system_prompt)
+        resp = gem.generate_content(
+            text,
+            generation_config=genai.GenerationConfig(
+                max_output_tokens=300,
+                temperature=0.75,
+            ),
         )
-        return jsonify({"rephrased": resp.choices[0].message.content.strip()})
+        return jsonify({"rephrased": resp.text.strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Blueprint parser ─────────────────────────────────────────────────────────
+
+_BLUEPRINT_PROMPT = """\
+Extract the chapter-wise marks distribution table from the text below.
+Return ONLY a JSON array where each object represents one chapter row (skip the Total row).
+Each object:
+{
+  "chapter": "<English chapter name only — not Kannada>",
+  "marks_1": <int, number of 1-mark questions, 0 if blank>,
+  "marks_2": <int, number of 2-mark questions, 0 if blank>,
+  "marks_3": <int, number of 3-mark questions, 0 if blank>,
+  "marks_4": <int, number of 4-mark questions, 0 if blank>,
+  "marks_5": <int, number of 5-mark questions, 0 if blank>
+}
+Skip any row that is a section heading, total row, or has no question counts.
+Text:
+"""
+
+
+def _english_chapter(raw: str) -> str:
+    """Pull the English chapter name out of a bilingual (Kannada+English) cell."""
+    for line in reversed(raw.splitlines()):
+        if len(re.findall(r'[A-Za-z]', line)) >= 3:
+            return line.strip()
+    ascii_only = re.sub(r'[^\x00-\x7f]', ' ', raw)
+    return re.sub(r'\s+', ' ', ascii_only).strip()
+
+
+def _blueprint_from_table(doc) -> list[dict] | None:
+    """
+    Extract the chapter-wise marks distribution structurally from the grid table.
+    Columns are mapped by header text ("1 Mark", "2 Mark", …) so the 1-mark
+    column is never dropped or misaligned. Returns row dicts, or None if no
+    usable table is found (caller then falls back to the LLM).
+    """
+    for page in doc:
+        try:
+            tables = page.find_tables().tables
+        except Exception:
+            return None
+        for tbl in tables:
+            try:
+                rows = tbl.extract()
+            except Exception:
+                continue
+            if not rows or len(rows) < 3:
+                continue
+
+            # Locate the header row (has ≥2 cells mentioning "mark").
+            header_idx = None
+            for i, r in enumerate(rows[:4]):
+                joined = " ".join(str(c or "").lower() for c in r)
+                if joined.count("mark") >= 2:
+                    header_idx = i
+                    break
+            if header_idx is None:
+                continue
+
+            header = [str(c or "").lower() for c in rows[header_idx]]
+            mark_cols: dict[int, int] = {}
+            for n in range(1, 6):
+                for j, h in enumerate(header):
+                    if re.search(rf'\b{n}\s*mark', h):
+                        mark_cols[n] = j
+                        break
+            chap_col = next(
+                (j for j, h in enumerate(header) if "chapter" in h or "name" in h),
+                None,
+            )
+            if len(mark_cols) < 3 or chap_col is None:
+                continue
+
+            def cell_int(cells: list, n: int) -> int:
+                j = mark_cols.get(n)
+                if j is None or j >= len(cells):
+                    return 0
+                m = re.search(r'\d+', cells[j])
+                return int(m.group()) if m else 0
+
+            out: list[dict] = []
+            for r in rows[header_idx + 1:]:
+                cells   = [str(c or "").strip() for c in r]
+                chapter = _english_chapter(cells[chap_col]) if chap_col < len(cells) else ""
+                if not chapter or "total" in chapter.lower():
+                    continue
+                row = {
+                    "chapter": chapter,
+                    "marks_1": cell_int(cells, 1),
+                    "marks_2": cell_int(cells, 2),
+                    "marks_3": cell_int(cells, 3),
+                    "marks_4": cell_int(cells, 4),
+                    "marks_5": cell_int(cells, 5),
+                }
+                if sum(row[k] for k in ("marks_1", "marks_2", "marks_3", "marks_4", "marks_5")):
+                    out.append(row)
+            if out:
+                print(f"[blueprint] structural table parse → {len(out)} chapters, mark cols={mark_cols}")
+                return out
+    return None
+
+
+@app.post("/api/parse-blueprint")
+def parse_blueprint():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".pdf"):
+        return jsonify({"error": "PDF file required"}), 400
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        f.save(tmp.name)
+        tmp.close()
+        doc = fitz.open(tmp.name)
+
+        # Try robust structural extraction first (handles bilingual grids
+        # without the LLM dropping the 1-mark column).
+        rows = _blueprint_from_table(doc)
+
+        if rows is None:
+            print("[blueprint] structural parse failed — falling back to LLM")
+            full_text = "\n".join(page.get_text() for page in doc)
+            doc.close()
+            gem  = genai.GenerativeModel(MODEL)
+            resp = gem.generate_content(
+                _BLUEPRINT_PROMPT + full_text,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=2000,
+                    temperature=0.0,
+                ),
+            )
+            rows = json.loads(resp.text.strip())
+        else:
+            doc.close()
+
+        if not isinstance(rows, list):
+            return jsonify({"error": "Could not parse blueprint table"}), 422
+
+        # Compute totals
+        total_q = sum(
+            r.get("marks_1", 0) + r.get("marks_2", 0) + r.get("marks_3", 0) +
+            r.get("marks_4", 0) + r.get("marks_5", 0)
+            for r in rows
+        )
+        total_m = sum(
+            r.get("marks_1", 0) * 1 + r.get("marks_2", 0) * 2 + r.get("marks_3", 0) * 3 +
+            r.get("marks_4", 0) * 4 + r.get("marks_5", 0) * 5
+            for r in rows
+        )
+        return jsonify({"rows": rows, "total_questions": total_q, "total_marks": total_m})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        os.unlink(tmp.name)
+
+
+# ── Chapter classifier ───────────────────────────────────────────────────────
+
+@app.post("/api/classify-questions")
+def classify_questions():
+    """
+    Given a list of {qid, text} and a list of chapter names,
+    return {qid -> chapter} for each question.
+    One Gemini call for all questions at once.
+    """
+    data     = request.get_json(force=True)
+    questions = data.get("questions", [])   # [{qid, text}, ...]
+    chapters  = data.get("chapters",  [])   # ["Real Numbers", "Polynomials", ...]
+
+    if not questions or not chapters:
+        return jsonify({"error": "questions and chapters required"}), 400
+
+    chapters_list = "\n".join(f"- {c}" for c in chapters)
+    q_lines = "\n".join(
+        f'{i}: {q["text"][:200]}'
+        for i, q in enumerate(questions)
+    )
+
+    prompt = f"""\
+You are a curriculum expert. Classify each question below into exactly one chapter from the given list.
+Return ONLY a JSON object mapping the question index (0-based integer as string) to the chapter name (exactly as written in the list).
+If a question does not clearly belong to any chapter, pick the closest one — never leave it unclassified.
+
+Chapters:
+{chapters_list}
+
+Questions:
+{q_lines}
+
+Return format: {{"0": "Chapter Name", "1": "Chapter Name", ...}}
+"""
+    try:
+        gem  = genai.GenerativeModel(MODEL)
+        resp = gem.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                max_output_tokens=4000,
+                temperature=0.0,
+            ),
+        )
+        index_map: dict[str, str] = json.loads(resp.text.strip())
+        # Convert index → qid
+        result = {
+            questions[int(idx)]["qid"]: chapter
+            for idx, chapter in index_map.items()
+            if idx.isdigit() and int(idx) < len(questions)
+        }
+        return jsonify({"classifications": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -669,4 +1227,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5050))
     print(f"\n  QP Builder API -> http://localhost:{port}/api/subjects")
     print(f"  Frontend dev  -> http://localhost:5174\n")
-    app.run(debug=True, port=port, host="0.0.0.0")
+    app.run(debug=True, port=port, host="0.0.0.0", use_reloader=False)

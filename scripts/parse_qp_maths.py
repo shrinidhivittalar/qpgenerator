@@ -21,7 +21,7 @@ import re
 import os
 
 
-PDF_PATH  = r"D:\Internship\qpgenerator\Karnataka SSLC Model Question Paper 2025 Maths English Medium Set 1.pdf"
+PDF_PATH  = r"C:\Users\shrin\Downloads\Karnataka SSLC Model Question Paper 2025 Maths English Medium Set 1.pdf"
 OUTPUT_DIR = r"D:\Internship\qpgenerator\parsed_output_maths"
 IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
 

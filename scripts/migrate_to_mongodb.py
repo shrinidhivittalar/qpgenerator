@@ -25,7 +25,8 @@ SOURCES = {
         "textbook": BASE / "parsed_output_science_textbook" / "questions.json",
     },
     "maths": {
-        "qp":       BASE / "parsed_output_maths" / "questions.json",
+        "qp":       BASE / "parsed_output_maths"          / "questions.json",
+        "yashassu": BASE / "parsed_output_yashassu_maths" / "questions.json",
     },
 }
 

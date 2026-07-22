@@ -1,9 +1,43 @@
+# ── Dependencies ─────────────────────────────────────────────────────────────
 node_modules/
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
 dist/
+qp-builder/frontend/dist/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
 .env
+.env.*
 *.env
 *.env.local
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-qp-builder/frontend/dist/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# ── Parsed output & data dirs (large, regenerable) ───────────────────────────
+parsed_output/
+parsed_output_*/
+
+# ── Uploaded files (local server storage) ────────────────────────────────────
+qp-builder/uploads/
+uploads/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Vite / tooling cache ──────────────────────────────────────────────────────
+.vite/
+.cache/
+
+# ── Claude Code project settings (machine-local) ─────────────────────────────
+.claude/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
 scripts/latexify_backup_*.json
+*.DS_Store
+Thumbs.db
