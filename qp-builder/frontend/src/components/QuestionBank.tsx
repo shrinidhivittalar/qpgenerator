@@ -192,38 +192,28 @@ export function QuestionBank({
           <select
             value={paperType}
             onChange={e => setPaperType(e.target.value)}
-            disabled={uploading}
-            title="Paper type helps the AI parse correctly"
+            disabled
+            title="Upload parsing is being refactored — coming soon"
             className="shrink-0 px-2 py-1.5 text-xs border border-gray-300 rounded-md bg-white
                        focus:outline-none focus:ring-2 focus:ring-indigo-400
-                       disabled:opacity-50 disabled:cursor-not-allowed"
+                       disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <option value="sslc_qp">SSLC QP</option>
             <option value="textbook">Textbook</option>
             <option value="generic">Other</option>
           </select>
 
-          {/* Upload PDF button */}
+          {/* Upload PDF button — disabled while parsing is being refactored */}
           <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            title="Upload a question paper PDF to parse with AI"
+            disabled
+            title="Upload parsing is being refactored — coming soon"
             className="shrink-0 px-2.5 py-1.5 text-xs font-medium rounded-md bg-indigo-50
-                       text-indigo-700 border border-indigo-200 hover:bg-indigo-100
-                       disabled:opacity-50 disabled:cursor-not-allowed transition"
+                       text-indigo-700 border border-indigo-200
+                       disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {uploading ? 'Parsing...' : '+ Upload PDF'}
+            + Upload PDF
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf"
-            className="hidden"
-            onChange={e => {
-              const f = e.target.files?.[0]
-              if (f) { onUpload(f, paperType); e.target.value = '' }
-            }}
-          />
+          <input ref={fileInputRef} type="file" accept=".pdf" className="hidden" />
         </div>
 
         {/* Inline rename field (shown when renaming an upload) */}

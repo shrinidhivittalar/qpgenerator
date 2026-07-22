@@ -118,15 +118,14 @@ export function Dashboard({
             </div>
           </button>
 
-          {/* Upload Bank */}
+          {/* Upload Bank — disabled while parsing is being refactored */}
           <button
-            onClick={onUploadBank}
+            disabled
+            title="Upload parsing is being refactored — coming soon"
             className="group text-left bg-white rounded-xl border border-slate-100 shadow-sm
-                       hover:shadow-md hover:border-amber-200 transition-all duration-150
-                       overflow-hidden focus-visible:outline-none focus-visible:ring-2
-                       focus-visible:ring-amber-500 focus-visible:ring-offset-2"
+                       overflow-hidden opacity-50 cursor-not-allowed"
           >
-            <div className="h-[3px] bg-amber-500" />
+            <div className="h-[3px] bg-amber-300" />
             <div className="p-5">
               <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center mb-4 text-lg"
                    aria-hidden="true">
@@ -138,8 +137,8 @@ export function Dashboard({
               </div>
             </div>
             <div className="px-5 pb-5">
-              <span className="text-xs font-semibold text-amber-600 group-hover:underline">
-                Upload PDF →
+              <span className="text-xs font-semibold text-amber-400">
+                Coming soon →
               </span>
             </div>
           </button>
