@@ -1,4 +1,4 @@
-import type { BankQuestion, RawQuestion, UploadParseResult } from './types'
+import type { BankQuestion, RawQuestion, UploadParseResult, ParsedModelPaper } from './types'
 
 async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   const token = localStorage.getItem('token')
@@ -185,6 +185,55 @@ export async function parseBlueprint(file: File): Promise<ParsedBlueprint> {
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || 'Blueprint parse failed')
   return data as ParsedBlueprint
+}
+
+export async function parseModelPaper(file: File): Promise<ParsedModelPaper> {
+  const form = new FormData()
+  form.append('file', file)
+  const res  = await authedFetch('/api/parse-model-paper', { method: 'POST', body: form })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'Model paper parse failed')
+  return data as ParsedModelPaper
+}
+
+export async function getModelPaper(subject: string): Promise<ParsedModelPaper | null> {
+  const res  = await authedFetch(`/api/model-paper/${encodeURIComponent(subject)}`)
+  if (!res.ok) return null
+  const data = await res.json()
+  return data as ParsedModelPaper | null
+}
+
+export async function saveModelPaper(subject: string, data: ParsedModelPaper): Promise<void> {
+  const res = await authedFetch(`/api/model-paper/${encodeURIComponent(subject)}`, {
+    method:  'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error('Failed to save model paper')
+}
+
+export async function deleteModelPaper(subject: string): Promise<void> {
+  await authedFetch(`/api/model-paper/${encodeURIComponent(subject)}`, { method: 'DELETE' })
+}
+
+export interface GenerateQuestionsParams {
+  subject_area:       string
+  question_type:      string
+  marks_per_question: number
+  count:              number
+  instruction:        string
+  example_questions:  { text: string; type: string; options: string[] | null }[]
+}
+
+export async function generateQuestions(params: GenerateQuestionsParams): Promise<BankQuestion[]> {
+  const res  = await authedFetch('/api/generate-questions', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(params),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || 'AI generation failed')
+  return data as BankQuestion[]
 }
 
 export function imageUrl(subject: string, source: string, filename: string): string {

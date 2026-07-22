@@ -21,10 +21,11 @@ BASE = Path(__file__).parent.parent
 # ── MongoDB ───────────────────────────────────────────────────────────────────
 _mongo      = MongoClient(os.getenv("MONGODB_URI"))
 _db         = _mongo["qp_builder"]
-qs_col      = _db["questions"]   # static question banks
-uploads_col = _db["uploads"]     # user-uploaded papers
-users_col   = _db["users"]       # user accounts
-sessions_col = _db["sessions"]   # user active sessions
+qs_col           = _db["questions"]     # static question banks
+uploads_col      = _db["uploads"]       # user-uploaded papers
+users_col        = _db["users"]         # user accounts
+sessions_col     = _db["sessions"]      # user active sessions
+model_papers_col = _db["model_papers"]  # saved model paper structures
 
 def get_current_user_role():
     auth_header = request.headers.get("Authorization")
@@ -1273,6 +1274,194 @@ def parse_blueprint():
         return jsonify({"error": str(e)}), 500
     finally:
         os.unlink(tmp.name)
+
+
+# ── Model paper parser ───────────────────────────────────────────────────────
+
+_MODEL_PAPER_PROMPT = """\
+Extract the complete question paper structure from this text. Return ONLY valid JSON:
+
+{
+  "sections": [
+    {
+      "section_number": "I",
+      "part": "Part A",
+      "part_topic": "Physics",
+      "question_type": "MCQ",
+      "question_count": 2,
+      "marks_per_question": 1,
+      "total_marks": 2,
+      "has_internal_choice": false,
+      "instruction": "Four alternatives are given for each of the following questions..."
+    }
+  ],
+  "total_questions": 38,
+  "total_marks": 80,
+  "duration_minutes": 195
+}
+
+Rules:
+- question_type must be exactly one of: "MCQ", "Short Answer", "Medium Answer", "Long Answer"
+  MCQ = has (A)(B)(C)(D) options; Short Answer = 1-2 marks; Medium Answer = 3 marks; Long Answer = 4+ marks
+- Each Roman numeral section heading (I, II, III, IV ...) is one entry
+- part: the Part label ("Part A", "Part B", "Part C"). Empty string "" if no explicit parts
+- part_topic: the subject within that part ("Physics", "Chemistry", "Biology"). Empty "" if no parts
+- has_internal_choice: true if the section contains "OR" between questions
+- instruction: the instruction line for that section (e.g. "Answer the following questions"), not the questions themselves
+- duration_minutes: total time in minutes (3 Hours 15 Minutes = 195)
+- Include ALL sections across ALL parts in order
+"""
+
+
+@app.post("/api/parse-model-paper")
+def parse_model_paper():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".pdf"):
+        return jsonify({"error": "PDF file required"}), 400
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    try:
+        f.save(tmp.name)
+        tmp.close()
+        doc = fitz.open(tmp.name)
+        full_text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+
+        gem  = genai.GenerativeModel(MODEL)
+        resp = gem.generate_content(
+            _MODEL_PAPER_PROMPT + "\n\nPAPER TEXT:\n" + full_text,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                max_output_tokens=3000,
+                temperature=0.0,
+            ),
+        )
+        data = json.loads(resp.text.strip())
+        if not isinstance(data.get("sections"), list):
+            return jsonify({"error": "Could not parse model paper structure"}), 422
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        os.unlink(tmp.name)
+
+
+@app.get("/api/model-paper/<subject>")
+def get_model_paper(subject):
+    doc = model_papers_col.find_one({"subject": subject}, {"_id": 0})
+    if not doc:
+        return jsonify(None)
+    return jsonify(doc)
+
+
+@app.put("/api/model-paper/<subject>")
+def save_model_paper(subject):
+    data = request.get_json(force=True)
+    model_papers_col.replace_one(
+        {"subject": subject},
+        {"subject": subject, **data, "updated_at": datetime.now(timezone.utc).isoformat()},
+        upsert=True,
+    )
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/model-paper/<subject>")
+def delete_model_paper_route(subject):
+    model_papers_col.delete_one({"subject": subject})
+    return jsonify({"ok": True})
+
+
+# ── AI question generator ────────────────────────────────────────────────────
+
+@app.post("/api/generate-questions")
+@require_roles("Admin", "Teacher")
+def generate_questions_endpoint():
+    data              = request.get_json(force=True)
+    subject_area      = (data.get("subject_area") or "").strip()
+    question_type     = (data.get("question_type") or "Short Answer").strip()
+    marks             = max(1, int(data.get("marks_per_question") or 1))
+    count             = max(1, min(10, int(data.get("count") or 1)))
+    instruction       = (data.get("instruction") or "").strip()
+    example_questions = data.get("example_questions") or []
+
+    is_mcq = question_type == "MCQ"
+    difficulty_map = {
+        1: "single-fact recall, very concise",
+        2: "brief explanation in 2–3 sentences",
+        3: "detailed explanation with steps or example",
+        4: "comprehensive answer with multiple points",
+        5: "essay-style long answer covering causes, effects, and examples",
+    }
+    difficulty_hint = difficulty_map.get(marks, f"appropriate for {marks} marks")
+    type_rules      = (
+        "Format: MCQ with exactly 4 options. Exactly one option must be correct."
+        if is_mcq else
+        "Format: descriptive question. No options needed."
+    )
+    type_str       = "mcq" if is_mcq else "text"
+    options_schema = '["<option A text>","<option B text>","<option C text>","<option D text>"]' if is_mcq else "null"
+
+    examples_block = ""
+    if example_questions:
+        lines = [f'{i+1}. {q["text"][:180]}' for i, q in enumerate(example_questions[:5])]
+        examples_block = "Style reference (existing bank questions):\n" + "\n".join(lines) + "\n\n"
+
+    prompt = (
+        f"You are an experienced Karnataka SSLC Class 10 teacher.\n"
+        f"Generate exactly {count} exam question(s) for the {subject_area or 'Science'} section.\n\n"
+        f"Requirements:\n"
+        f"- Subject: {subject_area or 'Science'}\n"
+        f"- Format: {question_type} ({marks} mark(s) each — {difficulty_hint})\n"
+        f"- Context: {instruction or 'General exam question'}\n"
+        f"- {type_rules}\n\n"
+        f"{examples_block}"
+        f"Return ONLY a JSON array with exactly {count} object(s). Each object:\n"
+        f'{{"text":"<full question text, no number prefix>","type":"{type_str}","options":{options_schema}}}\n\n'
+        f"LaTeX rules: chemical formulas use $\\ce{{...}}$ (e.g. $\\ce{{H2SO4}}$); "
+        f"math uses $...$ (e.g. $x^{{2}}$, $\\frac{{a}}{{b}}$). Plain prose needs no LaTeX.\n"
+    )
+
+    try:
+        gem  = genai.GenerativeModel(MODEL)
+        resp = gem.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+                max_output_tokens=2000,
+                temperature=0.7,
+            ),
+        )
+        questions = json.loads(resp.text.strip())
+        if not isinstance(questions, list):
+            return jsonify({"error": "AI returned unexpected format"}), 422
+
+        result = []
+        for i, q in enumerate(questions[:count]):
+            text = (q.get("text") or "").strip()
+            if not text:
+                continue
+            options = q.get("options") if is_mcq else None
+            if is_mcq and not isinstance(options, list):
+                options = None
+            result.append({
+                "qid":         f"AI_{uuid.uuid4().hex[:8]}",
+                "number":      i + 1,
+                "text":        text,
+                "type":        type_str,
+                "options":     options,
+                "has_figure":  False,
+                "has_table":   False,
+                "images":      [],
+                "tables":      [],
+                "source":      "ai_generated",
+                "chapter":     None,
+                "chapter_num": None,
+                "section":     None,
+                "subject_area": subject_area or None,
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Chapter classifier ───────────────────────────────────────────────────────

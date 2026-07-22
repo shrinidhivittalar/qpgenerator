@@ -46,17 +46,19 @@ export interface BankQuestion {
   chapter:     string | null
   chapter_num: number | null
   section:     string | null   // 'exercises' | 'in_text' | null
-  marks?:      number          // pre-set mark value from question bank
-  difficulty?: string | null   // 'Easy' | 'Average' | 'Difficult'
+  marks?:       number          // pre-set mark value from question bank
+  difficulty?:  string | null   // 'Easy' | 'Average' | 'Difficult'
+  subject_area?: string | null  // 'Physics' | 'Chemistry' | 'Biology' — tagged by chapter
 }
 
 export interface PaperItem extends BankQuestion {
-  uid:          string   // unique slot ID in this paper
-  subject:      string
-  marks:        number
-  sectionId:    string | null
-  isRephrased:  boolean
-  originalText: string
+  uid:            string   // unique slot ID in this paper
+  subject:        string
+  marks:          number
+  sectionId:      string | null
+  isRephrased:    boolean
+  originalText:   string
+  isAiGenerated?: boolean
 }
 
 // ── Paper configuration ───────────────────────────────────────────────────────
@@ -116,7 +118,28 @@ export interface PaperTab {
   config:   PaperConfiguration
 }
 
-// Raw question returned by /api/upload before user review
+// ── Model paper (paper format template) ──────────────────────────────────────
+
+export interface ModelPaperSection {
+  section_number:      string   // "I", "II", "VI", …
+  part:                string   // "Part A" | ""
+  part_topic:          string   // "Physics" | ""
+  question_type:       string   // "MCQ" | "Short Answer" | "Medium Answer" | "Long Answer"
+  question_count:      number
+  marks_per_question:  number
+  total_marks:         number
+  has_internal_choice: boolean
+  instruction:         string
+}
+
+export interface ParsedModelPaper {
+  sections:         ModelPaperSection[]
+  total_questions:  number
+  total_marks:      number
+  duration_minutes: number
+}
+
+// ── Raw question returned by /api/upload before user review
 export interface RawQuestion {
   number:  number
   text:    string

@@ -96,6 +96,11 @@ export function PaperCard({
                 REPHRASED
               </span>
             )}
+            {item.isAiGenerated && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium tracking-wide bg-violet-50 text-violet-600 font-mono">
+                AI GENERATED
+              </span>
+            )}
           </div>
 
           {/* Question text / edit textarea */}

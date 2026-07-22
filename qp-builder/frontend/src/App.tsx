@@ -362,10 +362,30 @@ export default function App() {
 
   const handleReorder = useCallback((items: PaperItem[]) => setItems(() => items), [setItems])
 
-  const handleAutoGenerate = useCallback((items: PaperItem[]) => {
+  const handleAutoGenerate = useCallback((items: PaperItem[], sections?: PaperSection[]) => {
+    if (sections && sections.length > 0) {
+      setSections(() => sections)
+      setActiveSectionId(sections[0].id)
+    }
     setItems(prev => [...prev, ...items])
     setShowAutoGenerate(false)
-  }, [setItems])
+  }, [setItems, setSections])
+
+  const handleAutoGenerateSets = useCallback((
+    sets: { items: PaperItem[]; sections: PaperSection[]; title: string }[]
+  ) => {
+    const newTabs: PaperTab[] = sets.map(s => ({
+      id:       mkUid(),
+      title:    s.title,
+      items:    s.items,
+      sections: s.sections,
+      config:   { ...DEFAULT_PAPER_CONFIG },
+    }))
+    setPapers(prev => [...prev, ...newTabs])
+    setActiveId(newTabs[0].id)
+    setActiveSectionId(newTabs[0].sections[0]?.id ?? null)
+    setShowAutoGenerate(false)
+  }, [])
 
   // ── Delete a source (uploaded paper OR static subject/source) ────────
   const handleDeleteSource = useCallback(async (subj: string, src: string) => {
@@ -782,6 +802,7 @@ export default function App() {
           allQuestions={bankQuestions}
           paperQids={paperQids}
           onGenerate={handleAutoGenerate}
+          onGenerateSets={handleAutoGenerateSets}
           onCancel={() => setShowAutoGenerate(false)}
         />
       )}
